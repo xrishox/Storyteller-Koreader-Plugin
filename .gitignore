@@ -1,0 +1,18 @@
+.codex
+spec*.md
+
+# KOReader/local runtime artifacts
+storyteller.log
+storyteller.debug
+*.ljbc
+*.tmp
+*.old
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/

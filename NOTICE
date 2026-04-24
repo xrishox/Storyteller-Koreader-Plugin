@@ -1,0 +1,10 @@
+This plugin is distributed under the GNU Affero General Public License,
+version 3 or any later version.
+
+Portions of this plugin were adapted from the earlier Storyteller KOReader
+plugin located at ../../storyteller.koplugin during development. That earlier
+plugin is distributed under the GNU Affero General Public License, version 3
+or any later version, and notes that portions of its main, EPUB, and sync code
+were adapted from the AGPL v3 BookFusion KOReader plugin.
+
+See LICENSE for the complete license text.
