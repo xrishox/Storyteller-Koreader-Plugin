@@ -4,7 +4,7 @@ Storyteller Koreader Plugin lets you use your [Storyteller](https://gitlab.com/s
 
 Use it to browse your Storyteller books on your ereader, download them into KOReader, and keep your place in sync with your Storyteller server.
 
-For a better user experience, I recommend [Simple UI](https://github.com/xrishox/simpleui.koplugin). It has native Storyteller integration, but it is not required.
+For a better user experience, I recommend [my Simple UI fork](https://github.com/xrishox/simpleui.koplugin). It has native Storyteller integration, but it is not required.
 
 ## What It Does
 
