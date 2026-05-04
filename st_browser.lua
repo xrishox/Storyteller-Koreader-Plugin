@@ -74,7 +74,7 @@ function Browser:load()
     local books_result = self.plugin.api:listBooks()
     local collections_result = self.plugin.api:listCollections()
     local series_result = self.plugin.api:listSeries()
-    if not books_result.ok or not collections_result.ok or not series_result.ok then
+    if not books_result.ok then
         self.plugin.log:warn("library_load_failed", {
             books = books_result.kind,
             collections = collections_result.kind,
@@ -83,11 +83,17 @@ function Browser:load()
         UIManager:show(InfoMessage:new{ text = "Failed to load Storyteller library data." })
         return
     end
+    if not collections_result.ok or not series_result.ok then
+        self.plugin.log:warn("library_partial_load_failed", {
+            collections = collections_result.kind,
+            series = series_result.kind,
+        })
+    end
     self.books = copyFilteredBooks(asList(books_result.data), function(book)
         return type(book) == "table" and book.uuid and Models.hasDownloadableFormat(book)
     end)
-    self.collections = asList(collections_result.data)
-    self.series = asList(series_result.data)
+    self.collections = collections_result.ok and asList(collections_result.data) or {}
+    self.series = series_result.ok and asList(series_result.data) or {}
     self:showRoot()
 end
 

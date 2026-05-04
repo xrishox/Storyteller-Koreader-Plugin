@@ -526,9 +526,12 @@ function Sync:pushProgressIfPossible(reason)
     if not self.active or not self.sidecar then
         return false
     end
-    local ok, sidecar = Sidecar:validate(self.filepath, self.plugin.config)
+    local ok, sidecar, sidecar_reason = Sidecar:validate(self.filepath, self.plugin.config)
     if not ok then
-        self.plugin.log:info("autosync_sidecar_invalid", { reason = reason })
+        self.plugin.log:info("autosync_sidecar_invalid", {
+            reason = sidecar_reason,
+            push_reason = reason,
+        })
         return false
     end
     self.sidecar = sidecar

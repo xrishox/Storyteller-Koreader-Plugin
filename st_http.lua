@@ -174,9 +174,14 @@ function Http:request(args)
         authenticated = authenticated,
     })
 
-    local code, response_headers, status_line = socket.skip(1, self:transportFor(url).request(request))
+    local ok, code, response_headers, status_line = pcall(function()
+        return socket.skip(1, self:transportFor(url).request(request))
+    end)
     socketutil:reset_timeout()
 
+    if not ok then
+        return { ok = false, kind = "network_error", status_line = tostring(code) }
+    end
     if isTimeoutCode(code) then
         return { ok = false, kind = "timeout", status_line = status_line }
     end
@@ -279,9 +284,14 @@ function Http:download(args)
 
     self.log:info("http_download", { path = args.path })
 
-    local code, response_headers, status_line = socket.skip(1, self:transportFor(url).request(request))
+    local ok, code, response_headers, status_line = pcall(function()
+        return socket.skip(1, self:transportFor(url).request(request))
+    end)
     socketutil:reset_timeout()
 
+    if not ok then
+        return { ok = false, kind = "network_error", status_line = tostring(code) }
+    end
     if isTimeoutCode(code) then
         return { ok = false, kind = "timeout", status_line = status_line }
     end

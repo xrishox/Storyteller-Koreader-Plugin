@@ -137,6 +137,11 @@ function Auth:poll()
                 return
             end
         end
+        if result.kind == "timeout" or result.kind == "network_error" or result.kind == "http_error" then
+            self.plugin.log:warn("device_token_retry", result)
+            self:schedulePoll(self.interval)
+            return
+        end
         self.plugin.log:warn("device_token_failed", result)
         self:clear()
         self:closeDialog()
