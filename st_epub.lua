@@ -860,13 +860,30 @@ function Epub:totalProgressionToXPointer(document, total_progression)
     return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body%s", selected.index + 1, xpath))
 end
 
-function Epub:locatorToXPointer(document, locator)
+function Epub:locatorToXPointer(document, locator, validator)
     if type(locator) ~= "table" then
         return nil, false, { reason = "missing_locator" }
     end
     local locations = type(locator.locations) == "table" and locator.locations or {}
     local attempts = {}
     local fragment_failed = false
+
+    local function acceptCandidate(attempt, xpointer)
+        if not xpointer then
+            attempt.resolved = false
+            return false
+        end
+        attempt.resolved = true
+        attempt.target = xpointer
+        if type(validator) == "function" and not validator(xpointer) then
+            attempt.accepted = false
+            attempt.reason = "target_not_in_document"
+            return false
+        end
+        attempt.accepted = true
+        return true
+    end
+
     if type(locations.fragments) == "table" and locations.fragments[1] then
         table.insert(attempts, {
             method = "fragment",
@@ -876,11 +893,9 @@ function Epub:locatorToXPointer(document, locator)
         local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
         attempts[#attempts].href_diagnostic = href_diagnostic
         local xpointer = self:hrefFragmentToXPointer(document, locator.href, locations.fragments[1])
-        if xpointer then
-            attempts[#attempts].resolved = true
+        if acceptCandidate(attempts[#attempts], xpointer) then
             return xpointer, true, { method = "fragment", attempts = attempts }
         end
-        attempts[#attempts].resolved = false
         fragment_failed = true
     end
     if fragment_failed and tonumber(locations.progression) == 0 and locations.totalProgression ~= nil then
@@ -889,11 +904,9 @@ function Epub:locatorToXPointer(document, locator)
             total_progression = locations.totalProgression,
         })
         local xpointer = self:totalProgressionToXPointer(document, locations.totalProgression)
-        if xpointer then
-            attempts[#attempts].resolved = true
+        if acceptCandidate(attempts[#attempts], xpointer) then
             return xpointer, false, { method = "total_progression_after_fragment", attempts = attempts }
         end
-        attempts[#attempts].resolved = false
     end
     if locations.progression ~= nil then
         table.insert(attempts, {
@@ -904,11 +917,9 @@ function Epub:locatorToXPointer(document, locator)
         local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
         attempts[#attempts].href_diagnostic = href_diagnostic
         local xpointer = self:hrefProgressionToXPointer(document, locator.href, locations.progression)
-        if xpointer then
-            attempts[#attempts].resolved = true
+        if acceptCandidate(attempts[#attempts], xpointer) then
             return xpointer, true, { method = "progression", attempts = attempts }
         end
-        attempts[#attempts].resolved = false
     end
     table.insert(attempts, {
         method = "chapter_start",
@@ -917,22 +928,18 @@ function Epub:locatorToXPointer(document, locator)
     local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
     attempts[#attempts].href_diagnostic = href_diagnostic
     local xpointer = self:hrefStartToXPointer(document, locator.href)
-    if xpointer then
-        attempts[#attempts].resolved = true
+    if acceptCandidate(attempts[#attempts], xpointer) then
         return xpointer, false, { method = "chapter_start", attempts = attempts }
     end
-    attempts[#attempts].resolved = false
     if locations.totalProgression ~= nil then
         table.insert(attempts, {
             method = "total_progression",
             total_progression = locations.totalProgression,
         })
         xpointer = self:totalProgressionToXPointer(document, locations.totalProgression)
-        if xpointer then
-            attempts[#attempts].resolved = true
+        if acceptCandidate(attempts[#attempts], xpointer) then
             return xpointer, false, { method = "total_progression", attempts = attempts }
         end
-        attempts[#attempts].resolved = false
     end
     return nil, false, { reason = "unresolved", attempts = attempts }
 end

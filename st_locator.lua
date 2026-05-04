@@ -66,22 +66,22 @@ function Locator:apply(ui, remote)
         return true, false
     end
 
-    local xpointer, precise, diagnostic = Epub:locatorToXPointer(ui.document, locator)
-    if not xpointer then
-        return false, false, diagnostic
-    end
-    if ui.document and ui.document.isXPointerInDocument then
+    local function validateXPointer(xpointer)
+        if not ui.document or not ui.document.isXPointerInDocument then
+            return true
+        end
         local ok, in_document = pcall(function()
             return ui.document:isXPointerInDocument(xpointer)
         end)
-        if ok and not in_document then
-            if type(diagnostic) ~= "table" then
-                diagnostic = {}
-            end
-            diagnostic.target = xpointer
-            diagnostic.reason = "target_not_in_document"
-            return false, false, diagnostic
+        if not ok then
+            return true
         end
+        return in_document
+    end
+
+    local xpointer, precise, diagnostic = Epub:locatorToXPointer(ui.document, locator, validateXPointer)
+    if not xpointer then
+        return false, false, diagnostic
     end
     ui:handleEvent(Event:new("GotoXPointer", xpointer))
     if type(diagnostic) ~= "table" then
