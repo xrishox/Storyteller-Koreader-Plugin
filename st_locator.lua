@@ -70,6 +70,19 @@ function Locator:apply(ui, remote)
     if not xpointer then
         return false, false, diagnostic
     end
+    if ui.document and ui.document.isXPointerInDocument then
+        local ok, in_document = pcall(function()
+            return ui.document:isXPointerInDocument(xpointer)
+        end)
+        if ok and not in_document then
+            if type(diagnostic) ~= "table" then
+                diagnostic = {}
+            end
+            diagnostic.target = xpointer
+            diagnostic.reason = "target_not_in_document"
+            return false, false, diagnostic
+        end
+    end
     ui:handleEvent(Event:new("GotoXPointer", xpointer))
     if type(diagnostic) ~= "table" then
         diagnostic = {}

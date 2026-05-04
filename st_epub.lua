@@ -866,6 +866,7 @@ function Epub:locatorToXPointer(document, locator)
     end
     local locations = type(locator.locations) == "table" and locator.locations or {}
     local attempts = {}
+    local fragment_failed = false
     if type(locations.fragments) == "table" and locations.fragments[1] then
         table.insert(attempts, {
             method = "fragment",
@@ -878,6 +879,19 @@ function Epub:locatorToXPointer(document, locator)
         if xpointer then
             attempts[#attempts].resolved = true
             return xpointer, true, { method = "fragment", attempts = attempts }
+        end
+        attempts[#attempts].resolved = false
+        fragment_failed = true
+    end
+    if fragment_failed and tonumber(locations.progression) == 0 and locations.totalProgression ~= nil then
+        table.insert(attempts, {
+            method = "total_progression_after_fragment",
+            total_progression = locations.totalProgression,
+        })
+        local xpointer = self:totalProgressionToXPointer(document, locations.totalProgression)
+        if xpointer then
+            attempts[#attempts].resolved = true
+            return xpointer, false, { method = "total_progression_after_fragment", attempts = attempts }
         end
         attempts[#attempts].resolved = false
     end
