@@ -83,6 +83,10 @@ local function stripFragment(path)
 end
 
 local function hrefKey(path)
+    path = tostring(path or "")
+    path = path:gsub("%?.*$", "")
+    path = path:gsub("^https?://[^/]+/api/v%d+/books/[^/]+/(read|listen)/", "")
+    path = path:gsub("^/api/v%d+/books/[^/]+/(read|listen)/", "")
     path = percentDecode(stripFragment(path)):gsub("^/+", "")
     return normalizePath(path)
 end
@@ -457,6 +461,22 @@ local function parseContainer(document)
     return container:match("<rootfile[^>]-full%-path%s*=%s*[\"'](.-)[\"']")
 end
 
+local function isTextMediaType(media_type)
+    return media_type == "application/xhtml+xml" or media_type == "text/html"
+end
+
+local function isReadableSpineItem(item)
+    return item
+        and isTextMediaType(item.media_type)
+        and item.linear ~= "no"
+        and item.href ~= nil
+        and item.href ~= ""
+end
+
+local function storytellerHref(item)
+    return item and (item.path or item.href) or ""
+end
+
 local function parseOpf(document)
     local rootfile = parseContainer(document)
     if not rootfile then
@@ -481,13 +501,22 @@ local function parseOpf(document)
         local attrs = parseAttrs(raw)
         local item = attrs.idref and manifest_by_id[attrs.idref]
         if item then
-            table.insert(spine, {
+            local spine_item = {
                 id = item.id,
                 href = item.href,
                 path = item.path,
+                linear = attrs.linear,
                 media_overlay = item["media-overlay"],
                 media_type = item["media-type"],
-            })
+            }
+            spine_item.spine_index = #spine
+            table.insert(spine, spine_item)
+        end
+    end
+    local reading_order = {}
+    for _, item in ipairs(spine) do
+        if isReadableSpineItem(item) then
+            table.insert(reading_order, item)
         end
     end
     return {
@@ -495,6 +524,7 @@ local function parseOpf(document)
         opf_dir = opf_dir,
         manifest_by_id = manifest_by_id,
         spine = spine,
+        reading_order = reading_order,
         spine_package_step = 6,
     }
 end
@@ -516,15 +546,21 @@ function Epub:resolveHref(document, href)
         return nil
     end
     local wanted = hrefKey(href)
+    if wanted == "" then
+        return nil
+    end
     local suffix_match
-    for index, item in ipairs(data.spine) do
-        local href_key = hrefKey(item.href)
-        local path_key = hrefKey(item.path)
-        if wanted == href_key or wanted == path_key then
-            return index - 1, item, data
-        end
-        if href_key:sub(-#wanted) == wanted or path_key:sub(-#wanted) == wanted then
-            suffix_match = suffix_match or { index - 1, item, data }
+    local items = data.reading_order or data.spine
+    for index, item in ipairs(items) do
+        if isTextMediaType(item.media_type) then
+            local href_key = hrefKey(item.href)
+            local path_key = hrefKey(item.path)
+            if wanted == href_key or wanted == path_key then
+                return index - 1, item, data
+            end
+            if href_key:sub(-#wanted) == wanted or path_key:sub(-#wanted) == wanted then
+                suffix_match = suffix_match or { index - 1, item, data }
+            end
         end
     end
     if suffix_match then
@@ -608,15 +644,77 @@ local function chooseReadaloudFragment(root, overlay_fragments, offset)
     return selected and selected.id
 end
 
+local function locatorFromItem(item, progression, total_progression, fragment)
+    local locations = {
+        progression = Models.clamp(progression or 0, 0, 1),
+        totalProgression = Models.clamp(total_progression or 0, 0, 1),
+    }
+    if fragment then
+        locations.fragments = { fragment }
+    end
+    return {
+        href = storytellerHref(item),
+        type = "application/xhtml+xml",
+        locations = locations,
+    }
+end
+
+function Epub:totalProgressionToLocator(document, total_progression)
+    local data = self:getSpine(document)
+    local reading_order = data and data.reading_order or nil
+    if type(reading_order) ~= "table" or #reading_order == 0 then
+        return nil
+    end
+
+    local target = Models.clamp(total_progression or 0, 0, 1)
+    local chapters = {}
+    local total_length = 0
+    for _, item in ipairs(reading_order) do
+        local _, root = self:readChapter(document, item)
+        local length = root and root.total_length or 0
+        table.insert(chapters, {
+            item = item,
+            root = root,
+            length = length,
+        })
+        total_length = total_length + length
+    end
+
+    if total_length <= 0 then
+        local index = math.floor(target * #reading_order) + 1
+        if index > #reading_order then
+            index = #reading_order
+        end
+        return locatorFromItem(reading_order[index], 0, target)
+    end
+
+    local target_offset = math.floor(total_length * target)
+    local consumed = 0
+    local selected = chapters[#chapters]
+    for _, chapter in ipairs(chapters) do
+        if target_offset <= consumed + chapter.length then
+            selected = chapter
+            break
+        end
+        consumed = consumed + chapter.length
+    end
+
+    local progression = 0
+    if selected and selected.length and selected.length > 0 then
+        progression = Models.clamp((target_offset - consumed) / selected.length, 0, 1)
+    end
+    return locatorFromItem(selected and selected.item, progression, target)
+end
+
 function Epub:xpointerToLocator(document, xpointer, total_progression, format)
     local chapter_index, body_path = parseXPointer(xpointer)
     if not chapter_index then
         return nil
     end
     local data = self:getSpine(document)
-    local item = data and data.spine[chapter_index + 1]
-    if not item then
-        return nil
+    local item = data and data.reading_order and data.reading_order[chapter_index + 1]
+    if not isReadableSpineItem(item) then
+        return self:totalProgressionToLocator(document, total_progression)
     end
     local _, root = self:readChapter(document, item)
     local progression = 0
@@ -630,18 +728,7 @@ function Epub:xpointerToLocator(document, xpointer, total_progression, format)
             fragment = chooseReadaloudFragment(root, smilFragments(document, data, item), offset)
         end
     end
-    local locations = {
-        progression = progression,
-        totalProgression = Models.clamp(total_progression or 0, 0, 1),
-    }
-    if fragment then
-        locations.fragments = { fragment }
-    end
-    return {
-        href = item.path or item.href,
-        type = "application/xhtml+xml",
-        locations = locations,
-    }
+    return locatorFromItem(item, progression, total_progression, fragment)
 end
 
 function Epub:hrefProgressionToXPointer(document, href, progression)
@@ -679,6 +766,59 @@ function Epub:hrefStartToXPointer(document, href)
     return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/", chapter_index + 1))
 end
 
+function Epub:totalProgressionToXPointer(document, total_progression)
+    local data = self:getSpine(document)
+    local reading_order = data and data.reading_order or nil
+    if type(reading_order) ~= "table" or #reading_order == 0 then
+        return nil
+    end
+    local target = Models.clamp(total_progression or 0, 0, 1)
+    local chapters = {}
+    local total_length = 0
+    for _, item in ipairs(reading_order) do
+        local _, root = self:readChapter(document, item)
+        local length = root and root.total_length or 0
+        table.insert(chapters, {
+            index = #chapters,
+            root = root,
+            length = length,
+        })
+        total_length = total_length + length
+    end
+
+    if total_length <= 0 then
+        local index = math.floor(target * #reading_order) + 1
+        if index > #reading_order then
+            index = #reading_order
+        end
+        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/", index))
+    end
+
+    local target_offset = math.floor(total_length * target)
+    local consumed = 0
+    local selected = chapters[#chapters]
+    for _, chapter in ipairs(chapters) do
+        if target_offset <= consumed + chapter.length then
+            selected = chapter
+            break
+        end
+        consumed = consumed + chapter.length
+    end
+
+    if not selected or not selected.root then
+        local chapter_index = selected and selected.index or 0
+        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/", chapter_index + 1))
+    end
+    local offset = target_offset - consumed
+    if offset < 0 then
+        offset = 0
+    elseif offset > selected.length then
+        offset = selected.length
+    end
+    local xpath = offsetToXPath(selected.root, offset)
+    return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body%s", selected.index + 1, xpath))
+end
+
 function Epub:locatorToXPointer(document, locator)
     if type(locator) ~= "table" then
         return nil
@@ -699,6 +839,12 @@ function Epub:locatorToXPointer(document, locator)
     local xpointer = self:hrefStartToXPointer(document, locator.href)
     if xpointer then
         return xpointer, false
+    end
+    if locations.totalProgression ~= nil then
+        xpointer = self:totalProgressionToXPointer(document, locations.totalProgression)
+        if xpointer then
+            return xpointer, false
+        end
     end
     return nil, false
 end

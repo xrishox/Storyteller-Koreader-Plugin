@@ -75,6 +75,16 @@ local function requestJsonBody(body)
     return nil, tostring(err or "json encode failed")
 end
 
+local function contentType(headers)
+    local value = Models.header(headers, "Content-Type")
+    return type(value) == "string" and string.lower(value) or ""
+end
+
+local function contentLength(headers)
+    local value = Models.header(headers, "Content-Length")
+    return tonumber(value)
+end
+
 function Http:new(config, log)
     local obj = {
         config = config,
@@ -88,6 +98,12 @@ function Http:baseUrl()
     local base_url = self.config:get("server_url")
     if type(base_url) ~= "string" or base_url == "" then
         return nil
+    end
+    if self.config.normalizeServerUrl then
+        local normalized = self.config:normalizeServerUrl(base_url)
+        if normalized and normalized ~= "" then
+            base_url = normalized
+        end
     end
     return base_url
 end
@@ -282,6 +298,26 @@ function Http:download(args)
         }
     end
     if code == 200 or code == 206 then
+        local ctype = contentType(response_headers)
+        if ctype:match("^text/html") or ctype:find("application/json", 1, true) then
+            return {
+                ok = false,
+                status = code,
+                kind = "unexpected_content_type",
+                headers = response_headers,
+                status_line = status_line,
+            }
+        end
+        local expected_length = contentLength(response_headers)
+        if expected_length and expected_length <= 0 then
+            return {
+                ok = false,
+                status = code,
+                kind = "empty_download",
+                headers = response_headers,
+                status_line = status_line,
+            }
+        end
         return {
             ok = true,
             status = code,

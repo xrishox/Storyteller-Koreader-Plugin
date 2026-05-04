@@ -102,6 +102,7 @@ function Config:normalizeServerUrl(input)
         url = "http://" .. url
     end
     url = url:gsub("/+$", "")
+    url = url:gsub("/api/v2$", "")
     local scheme, rest = url:match("^(https?)://(.+)$")
     if not scheme or not rest or rest == "" then
         return nil, "invalid"
