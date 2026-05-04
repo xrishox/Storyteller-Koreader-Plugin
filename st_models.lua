@@ -218,4 +218,28 @@ function Models.locatorSummary(locator)
     }
 end
 
+function Models.locatorForLog(locator)
+    if type(locator) ~= "table" then
+        return nil
+    end
+    local locations = type(locator.locations) == "table" and locator.locations or {}
+    local fragments
+    if type(locations.fragments) == "table" then
+        fragments = {}
+        for index, fragment in ipairs(locations.fragments) do
+            fragments[index] = fragment
+        end
+    end
+    return {
+        href = locator.href,
+        type = locator.type,
+        locations = {
+            fragments = fragments,
+            progression = locations.progression,
+            totalProgression = locations.totalProgression,
+            position = locations.position,
+        },
+    }
+end
+
 return Models

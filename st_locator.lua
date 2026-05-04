@@ -66,12 +66,16 @@ function Locator:apply(ui, remote)
         return true, false
     end
 
-    local xpointer, precise = Epub:locatorToXPointer(ui.document, locator)
+    local xpointer, precise, diagnostic = Epub:locatorToXPointer(ui.document, locator)
     if not xpointer then
-        return false, false
+        return false, false, diagnostic
     end
     ui:handleEvent(Event:new("GotoXPointer", xpointer))
-    return true, precise
+    if type(diagnostic) ~= "table" then
+        diagnostic = {}
+    end
+    diagnostic.target = xpointer
+    return true, precise, diagnostic
 end
 
 function Locator:summary(locator)

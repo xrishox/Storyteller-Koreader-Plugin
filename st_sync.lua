@@ -26,6 +26,14 @@ local function show(text)
     UIManager:show(InfoMessage:new{ text = text })
 end
 
+function Sync:logPositionPayload(event_name, payload, extra)
+    local data = extra or {}
+    data.timestamp = payload and payload.timestamp or data.timestamp
+    data.locator = Models.locatorForLog(payload and payload.locator or data.locator)
+    data.locator_summary = Models.locatorSummary(payload and payload.locator or data.locator)
+    self.plugin.log:info(event_name, data)
+end
+
 function Sync:new(plugin)
     local obj = {
         plugin = plugin,
@@ -158,6 +166,7 @@ function Sync:manualPush()
             return
         end
         local payload = Locator:build(self.plugin.ui, sidecar)
+        self:logPositionPayload("position_push_payload", payload, { source = "manual_push" })
         local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
         UIManager:close(msg)
         if result.ok then
@@ -191,6 +200,14 @@ function Sync:manualFetch()
         end
         local result = self.plugin.api:getPosition(sidecar.book_uuid)
         UIManager:close(msg)
+        self.plugin.log:info("manual_fetch_position_result", {
+            ok = result.ok,
+            kind = result.kind,
+            status = result.status,
+            timestamp = result.data and result.data.timestamp or nil,
+            locator = Models.locatorForLog(result.data and result.data.locator or nil),
+            locator_summary = result.data and Models.locatorSummary(result.data.locator) or nil,
+        })
         if result.ok and type(result.data) == "table" and result.data.locator then
             if self:documentFile() ~= filepath then
                 show("Failed to fetch reading position.")
@@ -282,6 +299,7 @@ function Sync:pushFreshLocal(filepath)
         return false
     end
     local payload = Locator:build(self.plugin.ui, sidecar, Models.nowMs())
+    self:logPositionPayload("position_push_payload", payload, { source = "conflict_keep_local" })
     local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
     if result.ok then
         Sidecar:updateSyncFields(filepath or self:documentFile(), payload.timestamp, "local_push", payload.locator)
@@ -309,7 +327,23 @@ function Sync:applyRemote(remote, filepath)
     end
     UIManager:scheduleIn(1, self.remote_apply_release_task)
 
-    local applied, precise = Locator:apply(self.plugin.ui, remote)
+    self.plugin.log:info("apply_remote_begin", {
+        timestamp = remote and remote.timestamp or nil,
+        locator = Models.locatorForLog(remote and remote.locator or nil),
+        locator_summary = Models.locatorSummary(remote and remote.locator or nil),
+        document_has_pages = self.plugin.ui and self.plugin.ui.document
+            and self.plugin.ui.document.info and self.plugin.ui.document.info.has_pages or nil,
+    })
+    local applied, precise, diagnostic = Locator:apply(self.plugin.ui, remote)
+    self.plugin.log:info("apply_remote_result", {
+        applied = applied,
+        precise = precise,
+        method = diagnostic and diagnostic.method or nil,
+        reason = diagnostic and diagnostic.reason or nil,
+        target = diagnostic and diagnostic.target or nil,
+        attempts = diagnostic and diagnostic.attempts or nil,
+        locator_summary = Models.locatorSummary(remote and remote.locator or nil),
+    })
     if applied then
         Sidecar:updateSyncFields(filepath or self:documentFile(), remote.timestamp, "remote_apply", remote.locator)
         if self.sidecar then
@@ -502,6 +536,7 @@ function Sync:pushProgressIfPossible(reason)
 
     local payload = self.pending_progress_payload or Locator:build(self.plugin.ui, sidecar)
     self.pending_progress_payload = payload
+    self:logPositionPayload("position_push_payload", payload, { source = "auto_push", reason = reason })
     local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
     if result.ok then
         self.pending_progress_payload = nil

@@ -547,26 +547,67 @@ function Epub:resolveHref(document, href)
     end
     local wanted = hrefKey(href)
     if wanted == "" then
-        return nil
+        return nil, nil, data, {
+            requested_href = href,
+            wanted = wanted,
+            reason = "empty_href",
+            spine_count = data.spine and #data.spine or 0,
+            reading_order_count = data.reading_order and #data.reading_order or 0,
+        }
     end
     local suffix_match
     local items = data.reading_order or data.spine
+    local first_items = {}
     for index, item in ipairs(items) do
         if isTextMediaType(item.media_type) then
             local href_key = hrefKey(item.href)
             local path_key = hrefKey(item.path)
+            if #first_items < 5 then
+                table.insert(first_items, {
+                    index = index - 1,
+                    href = item.href,
+                    path = item.path,
+                    linear = item.linear,
+                    media_type = item.media_type,
+                })
+            end
             if wanted == href_key or wanted == path_key then
-                return index - 1, item, data
+                return index - 1, item, data, {
+                    requested_href = href,
+                    wanted = wanted,
+                    match = "exact",
+                    matched_index = index - 1,
+                    matched_href = item.href,
+                    matched_path = item.path,
+                    spine_count = data.spine and #data.spine or 0,
+                    reading_order_count = data.reading_order and #data.reading_order or 0,
+                }
             end
             if href_key:sub(-#wanted) == wanted or path_key:sub(-#wanted) == wanted then
-                suffix_match = suffix_match or { index - 1, item, data }
+                suffix_match = suffix_match or { index - 1, item, data, {
+                    requested_href = href,
+                    wanted = wanted,
+                    match = "suffix",
+                    matched_index = index - 1,
+                    matched_href = item.href,
+                    matched_path = item.path,
+                    spine_count = data.spine and #data.spine or 0,
+                    reading_order_count = data.reading_order and #data.reading_order or 0,
+                } }
             end
         end
     end
     if suffix_match then
-        return suffix_match[1], suffix_match[2], suffix_match[3]
+        return suffix_match[1], suffix_match[2], suffix_match[3], suffix_match[4]
     end
-    return nil
+    return nil, nil, data, {
+        requested_href = href,
+        wanted = wanted,
+        reason = "not_found",
+        spine_count = data.spine and #data.spine or 0,
+        reading_order_count = data.reading_order and #data.reading_order or 0,
+        first_items = first_items,
+    }
 end
 
 function Epub:readChapter(document, item)
@@ -821,32 +862,65 @@ end
 
 function Epub:locatorToXPointer(document, locator)
     if type(locator) ~= "table" then
-        return nil
+        return nil, false, { reason = "missing_locator" }
     end
     local locations = type(locator.locations) == "table" and locator.locations or {}
+    local attempts = {}
     if type(locations.fragments) == "table" and locations.fragments[1] then
+        table.insert(attempts, {
+            method = "fragment",
+            href = locator.href,
+            fragment = locations.fragments[1],
+        })
+        local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
+        attempts[#attempts].href_diagnostic = href_diagnostic
         local xpointer = self:hrefFragmentToXPointer(document, locator.href, locations.fragments[1])
         if xpointer then
-            return xpointer, true
+            attempts[#attempts].resolved = true
+            return xpointer, true, { method = "fragment", attempts = attempts }
         end
+        attempts[#attempts].resolved = false
     end
     if locations.progression ~= nil then
+        table.insert(attempts, {
+            method = "progression",
+            href = locator.href,
+            progression = locations.progression,
+        })
+        local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
+        attempts[#attempts].href_diagnostic = href_diagnostic
         local xpointer = self:hrefProgressionToXPointer(document, locator.href, locations.progression)
         if xpointer then
-            return xpointer, true
+            attempts[#attempts].resolved = true
+            return xpointer, true, { method = "progression", attempts = attempts }
         end
+        attempts[#attempts].resolved = false
     end
+    table.insert(attempts, {
+        method = "chapter_start",
+        href = locator.href,
+    })
+    local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
+    attempts[#attempts].href_diagnostic = href_diagnostic
     local xpointer = self:hrefStartToXPointer(document, locator.href)
     if xpointer then
-        return xpointer, false
+        attempts[#attempts].resolved = true
+        return xpointer, false, { method = "chapter_start", attempts = attempts }
     end
+    attempts[#attempts].resolved = false
     if locations.totalProgression ~= nil then
+        table.insert(attempts, {
+            method = "total_progression",
+            total_progression = locations.totalProgression,
+        })
         xpointer = self:totalProgressionToXPointer(document, locations.totalProgression)
         if xpointer then
-            return xpointer, false
+            attempts[#attempts].resolved = true
+            return xpointer, false, { method = "total_progression", attempts = attempts }
         end
+        attempts[#attempts].resolved = false
     end
-    return nil, false
+    return nil, false, { reason = "unresolved", attempts = attempts }
 end
 
 return Epub
