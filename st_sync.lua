@@ -21,9 +21,20 @@ local VERIFY_STALE = "stale"
 local VERIFY_AUTH = "auth"
 local VERIFY_TIMEOUT = "timeout"
 local VERIFY_TRANSIENT = "transient"
+local REMOTE_APPLY_SETTLE_SECONDS = 15
 
 local function show(text)
     UIManager:show(InfoMessage:new{ text = text })
+end
+
+local function currentDocumentPage(ui)
+    if not ui or not ui.document or not ui.document.getCurrentPage then
+        return nil
+    end
+    local ok, page = pcall(function()
+        return ui.document:getCurrentPage()
+    end)
+    return ok and page or nil
 end
 
 function Sync:logPositionPayload(event_name, payload, extra)
@@ -47,6 +58,7 @@ function Sync:new(plugin)
         autosync_error_dialog = nil,
         autosync_paused_until_reset = false,
         suppress_progress_capture = false,
+        remote_apply_block_until = 0,
         remote_apply_release_task = nil,
         last_page = nil,
         generation = 0,
@@ -318,14 +330,21 @@ function Sync:applyRemote(remote, filepath)
     self:unschedulePush()
     self.pending_progress_payload = nil
     self.suppress_progress_capture = true
+    self.remote_apply_block_until = Models.nowMs() + REMOTE_APPLY_SETTLE_SECONDS * 1000
     if self.remote_apply_release_task then
         UIManager:unschedule(self.remote_apply_release_task)
     end
     self.remote_apply_release_task = function()
         self.suppress_progress_capture = false
+        self.remote_apply_block_until = 0
+        self.pending_progress_payload = nil
+        self.last_page = currentDocumentPage(self.plugin.ui)
+        self.plugin.log:info("apply_remote_capture_resumed", {
+            last_page = self.last_page,
+        })
         self.remote_apply_release_task = nil
     end
-    UIManager:scheduleIn(1, self.remote_apply_release_task)
+    UIManager:scheduleIn(REMOTE_APPLY_SETTLE_SECONDS, self.remote_apply_release_task)
 
     self.plugin.log:info("apply_remote_begin", {
         timestamp = remote and remote.timestamp or nil,
@@ -397,6 +416,7 @@ function Sync:stopAuto(flush)
     self.pending_progress_payload = nil
     self.remote_conflict_pending = false
     self.suppress_progress_capture = false
+    self.remote_apply_block_until = 0
     self.autosync_paused_until_reset = false
     self.generation = self.generation + 1
     self:unschedulePush()
@@ -411,7 +431,16 @@ function Sync:stopAuto(flush)
 end
 
 function Sync:onPageUpdate(page)
-    if not self.active or self.suppress_progress_capture then
+    if not self.active then
+        return
+    end
+    if self.suppress_progress_capture or Models.nowMs() < (self.remote_apply_block_until or 0) then
+        self.pending_progress_payload = nil
+        self.plugin.log:info("autosync_capture_suppressed", {
+            page = page,
+            suppress_progress_capture = self.suppress_progress_capture,
+            remote_apply_block_until = self.remote_apply_block_until,
+        })
         return
     end
     if page == nil or page == self.last_page then
