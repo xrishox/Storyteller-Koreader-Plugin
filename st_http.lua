@@ -267,6 +267,13 @@ function Http:download(args)
     if not file then
         return { ok = false, kind = "network_error", status_line = err }
     end
+    local function fail(result)
+        pcall(function()
+            file:close()
+        end)
+        os.remove(args.filepath)
+        return result
+    end
 
     local headers = {
         ["Accept"] = args.accept or "application/epub+zip,application/octet-stream",
@@ -290,16 +297,16 @@ function Http:download(args)
     socketutil:reset_timeout()
 
     if not ok then
-        return { ok = false, kind = "network_error", status_line = tostring(code) }
+        return fail{ ok = false, kind = "network_error", status_line = tostring(code) }
     end
     if isTimeoutCode(code) then
-        return { ok = false, kind = "timeout", status_line = status_line }
+        return fail{ ok = false, kind = "timeout", status_line = status_line }
     end
     if type(code) ~= "number" then
-        return { ok = false, kind = "network_error", status_line = tostring(code) }
+        return fail{ ok = false, kind = "network_error", status_line = tostring(code) }
     end
     if classifyAuthFailure(code) then
-        return {
+        return fail{
             ok = false,
             status = code,
             kind = "not_authenticated",
@@ -310,7 +317,7 @@ function Http:download(args)
     if code == 200 or code == 206 then
         local ctype = contentType(response_headers)
         if ctype:match("^text/html") or ctype:find("application/json", 1, true) then
-            return {
+            return fail{
                 ok = false,
                 status = code,
                 kind = "unexpected_content_type",
@@ -320,7 +327,7 @@ function Http:download(args)
         end
         local expected_length = contentLength(response_headers)
         if expected_length and expected_length <= 0 then
-            return {
+            return fail{
                 ok = false,
                 status = code,
                 kind = "empty_download",
@@ -337,7 +344,7 @@ function Http:download(args)
             downloaded_hash = Models.header(response_headers, "X-Storyteller-Hash"),
         }
     end
-    return {
+    return fail{
         ok = false,
         status = code,
         kind = "http_error",

@@ -297,6 +297,10 @@ function Storyteller:onResume()
     self.sync:onResume()
 end
 
+function Storyteller:onNetworkConnected()
+    self.sync:onNetworkConnected()
+end
+
 function Storyteller:onPageUpdate(page)
     self.sync:onPageUpdate(page)
 end
@@ -312,6 +316,7 @@ end
 function Storyteller:onCloseWidget()
     if self.auth then
         self.auth:clear()
+        self.auth:closeDialog()
     end
     if self.sync then
         self.sync:stopAuto(false)

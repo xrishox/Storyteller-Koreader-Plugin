@@ -74,9 +74,15 @@ function Auth:start()
         end)
         return
     end
-    NetworkMgr:runWhenOnline(function()
+    local server_url = config:get("server_url")
+    NetworkMgr:runWhenConnected(function()
+        if self.plugin.config:get("server_url") ~= server_url then
+            return
+        end
         local result = self.plugin.api:deviceStart()
-        if not result.ok or type(result.data) ~= "table" then
+        if not result.ok or type(result.data) ~= "table"
+                or type(result.data.device_code) ~= "string"
+                or result.data.device_code == "" then
             self.plugin.log:warn("device_start_failed", result)
             self:showMessage("Failed to start Storyteller device linking.")
             return
@@ -110,8 +116,12 @@ function Auth:poll()
         self:showMessage("Device code expired. Please try again.")
         return
     end
-    NetworkMgr:runWhenOnline(function()
-        local result = self.plugin.api:deviceToken(self.device_code)
+    local device_code = self.device_code
+    NetworkMgr:runWhenConnected(function()
+        if self.device_code ~= device_code then
+            return
+        end
+        local result = self.plugin.api:deviceToken(device_code)
         if result.ok and type(result.data) == "table" and result.data.access_token then
             self:onToken(result.data)
             return

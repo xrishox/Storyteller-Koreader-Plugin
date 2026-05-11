@@ -14,6 +14,9 @@ local Sidecar = require("st_sidecar")
 local Downloader = {}
 
 local function isFile(path)
+    if type(path) ~= "string" or path == "" then
+        return false
+    end
     return lfs.attributes(path, "mode") == "file"
 end
 
@@ -36,6 +39,27 @@ local function joinPath(dir, name)
         return dir .. name
     end
     return dir .. "/" .. name
+end
+
+local function isDir(path)
+    if type(path) ~= "string" or path == "" then
+        return false
+    end
+    return lfs.attributes(path, "mode") == "directory"
+end
+
+local function ensureDir(path)
+    if not path or path == "" or isDir(path) then
+        return true
+    end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= path and parent ~= "" and not ensureDir(parent) then
+        return false
+    end
+    if isDir(path) then
+        return true
+    end
+    return lfs.mkdir(path) == true
 end
 
 function Downloader:new(plugin)
@@ -98,7 +122,7 @@ function Downloader:findExisting(book, format, dir)
         if isFile(path) then
             local data = Sidecar:read(path)
             if Sidecar:identityMatches(data, identity) then
-                if data.asset_updated_at == relation.updatedAt then
+                if data.asset_uuid == relation.uuid and data.asset_updated_at == relation.updatedAt then
                     return path, "fresh"
                 end
                 return path, "stale"
@@ -119,6 +143,10 @@ function Downloader:chooseFolder(book, format, replace_path, forced_path)
     require("ui/downloadmgr"):new{
         title = _("Choose download directory"),
         onConfirm = function(path)
+            if type(path) ~= "string" or path == "" then
+                UIManager:show(InfoMessage:new{ text = "Download failed." })
+                return
+            end
             self.plugin.config:set("download_dir", path)
             UIManager:nextTick(function()
                 local new_forced_path
@@ -146,6 +174,10 @@ function Downloader:selectAndOpen(book, requested_format)
         return
     end
     local dir = self:defaultDir()
+    if type(dir) ~= "string" or dir == "" then
+        UIManager:show(InfoMessage:new{ text = "Download failed." })
+        return
+    end
     local path, state = self:findExisting(book, format, dir)
     if state == "fresh" then
         ReaderUI:showReader(path)
@@ -220,6 +252,10 @@ end
 
 function Downloader:confirm(book, format, replace_path, forced_path)
     local dir = self:defaultDir()
+    if type(dir) ~= "string" or dir == "" then
+        UIManager:show(InfoMessage:new{ text = "Download failed." })
+        return
+    end
     local final_path = forced_path or replace_path or self:pathFor(book, format, nil, dir)
     local dialog
     dialog = ButtonDialog:new{
@@ -252,13 +288,24 @@ function Downloader:confirm(book, format, replace_path, forced_path)
 end
 
 function Downloader:download(book, format, final_path, replacing)
-    NetworkMgr:runWhenOnline(function()
-        local dir = final_path:match("^(.*)/[^/]+$")
-        if dir and lfs.attributes(dir, "mode") ~= "directory" then
-            lfs.mkdir(dir)
+    if type(book) ~= "table" or type(book.uuid) ~= "string" or book.uuid == "" then
+        UIManager:show(InfoMessage:new{ text = "Download failed." })
+        return
+    end
+    if type(final_path) ~= "string" or final_path == "" then
+        UIManager:show(InfoMessage:new{ text = "Download failed." })
+        return
+    end
+    local server_url = self.plugin.config:get("server_url")
+    local user_id = self.plugin.config:get("user_id")
+    NetworkMgr:runWhenConnected(function()
+        if self.plugin.config:get("server_url") ~= server_url
+                or self.plugin.config:get("user_id") ~= user_id then
+            UIManager:show(InfoMessage:new{ text = "Download failed." })
+            return
         end
-        local relation = Models.getAssetRelation(book, format)
-        if not Models.isDownloadableRelation(book, format) or not relation.updatedAt then
+        local dir = final_path:match("^(.*)/[^/]+$")
+        if dir and not ensureDir(dir) then
             UIManager:show(InfoMessage:new{ text = "Download failed." })
             return
         end
@@ -267,24 +314,36 @@ function Downloader:download(book, format, final_path, replacing)
             UIManager:show(InfoMessage:new{ text = "Download failed." })
             return
         end
+        local book_result = self.plugin.api:getBook(book.uuid)
+        if not book_result.ok or type(book_result.data) ~= "table" then
+            self.plugin.log:warn("download_book_verify_failed", book_result)
+            UIManager:show(InfoMessage:new{ text = "Download failed." })
+            return
+        end
+        local download_book = book_result.data
+        if type(download_book.uuid) ~= "string" or download_book.uuid == "" then
+            download_book.uuid = book.uuid
+        end
+        local relation = Models.getAssetRelation(download_book, format)
+        if not Models.isDownloadableRelation(download_book, format) or not relation.updatedAt then
+            UIManager:show(InfoMessage:new{ text = "Download failed." })
+            return
+        end
         local tmp_path = final_path .. ".storyteller.tmp"
         os.remove(tmp_path)
-        local result = self.plugin.api:downloadFile(book.uuid, format, tmp_path)
+        local result = self.plugin.api:downloadFile(download_book.uuid or book.uuid, format, tmp_path)
         if not result.ok or not result.downloaded_hash then
             os.remove(tmp_path)
             self.plugin.log:warn("download_failed", result)
             UIManager:show(InfoMessage:new{ text = "Download failed." })
             return
         end
-        if replacing then
-            Sidecar:remove(final_path)
-        end
         if os.rename(tmp_path, final_path) ~= true then
             os.remove(tmp_path)
             UIManager:show(InfoMessage:new{ text = "Download failed." })
             return
         end
-        local sidecar = Sidecar:build(self.plugin.config, final_path, book, format, result.downloaded_hash)
+        local sidecar = Sidecar:build(self.plugin.config, final_path, download_book, format, result.downloaded_hash)
         if not Sidecar:writeFull(final_path, sidecar, replacing) then
             if not replacing then
                 os.remove(final_path)

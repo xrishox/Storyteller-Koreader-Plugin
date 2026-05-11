@@ -53,17 +53,28 @@ function Locator:apply(ui, remote)
     if ui.document and ui.document.info and ui.document.info.has_pages then
         local total = tonumber(locations.totalProgression)
         if not total or not ui.document.getPageCount then
-            return false, false
+            return false, false, { reason = "missing_page_progress" }
         end
-        local page_count = ui.document:getPageCount()
+        local ok, page_count = pcall(function()
+            return ui.document:getPageCount()
+        end)
+        if not ok or not tonumber(page_count) or tonumber(page_count) < 1 then
+            return false, false, { reason = "invalid_page_count" }
+        end
+        page_count = tonumber(page_count)
         local page = math.floor(Models.clamp(total, 0, 1) * page_count)
         if page < 1 then
             page = 1
         elseif page > page_count then
             page = page_count
         end
-        ui:handleEvent(Event:new("GotoPage", page))
-        return true, false
+        ok = pcall(function()
+            ui:handleEvent(Event:new("GotoPage", page))
+        end)
+        if not ok then
+            return false, false, { reason = "goto_page_failed", page = page }
+        end
+        return true, false, { method = "page", target = page }
     end
 
     local function validateXPointer(xpointer)
@@ -83,7 +94,17 @@ function Locator:apply(ui, remote)
     if not xpointer then
         return false, false, diagnostic
     end
-    ui:handleEvent(Event:new("GotoXPointer", xpointer))
+    local ok = pcall(function()
+        ui:handleEvent(Event:new("GotoXPointer", xpointer))
+    end)
+    if not ok then
+        if type(diagnostic) ~= "table" then
+            diagnostic = {}
+        end
+        diagnostic.reason = "goto_xpointer_failed"
+        diagnostic.target = xpointer
+        return false, false, diagnostic
+    end
     if type(diagnostic) ~= "table" then
         diagnostic = {}
     end

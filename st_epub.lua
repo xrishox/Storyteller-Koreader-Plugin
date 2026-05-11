@@ -85,8 +85,10 @@ end
 local function hrefKey(path)
     path = tostring(path or "")
     path = path:gsub("%?.*$", "")
-    path = path:gsub("^https?://[^/]+/api/v%d+/books/[^/]+/(read|listen)/", "")
-    path = path:gsub("^/api/v%d+/books/[^/]+/(read|listen)/", "")
+    path = path:gsub("^https?://[^/]+/api/v%d+/books/[^/]+/read/", "")
+    path = path:gsub("^https?://[^/]+/api/v%d+/books/[^/]+/listen/", "")
+    path = path:gsub("^/api/v%d+/books/[^/]+/read/", "")
+    path = path:gsub("^/api/v%d+/books/[^/]+/listen/", "")
     path = percentDecode(stripFragment(path)):gsub("^/+", "")
     return normalizePath(path)
 end
@@ -477,6 +479,11 @@ local function storytellerHref(item)
     return item and (item.path or item.href) or ""
 end
 
+local function docFragmentNumber(item, fallback_zero_index)
+    local spine_index = type(item) == "table" and tonumber(item.spine_index) or nil
+    return (spine_index or fallback_zero_index or 0) + 1
+end
+
 local function parseOpf(document)
     local rootfile = parseContainer(document)
     if not rootfile then
@@ -556,15 +563,16 @@ function Epub:resolveHref(document, href)
         }
     end
     local suffix_match
-    local items = data.reading_order or data.spine
+    local items = data.spine or data.reading_order
     local first_items = {}
     for index, item in ipairs(items) do
         if isTextMediaType(item.media_type) then
+            local spine_index = tonumber(item.spine_index) or (index - 1)
             local href_key = hrefKey(item.href)
             local path_key = hrefKey(item.path)
             if #first_items < 5 then
                 table.insert(first_items, {
-                    index = index - 1,
+                    index = spine_index,
                     href = item.href,
                     path = item.path,
                     linear = item.linear,
@@ -572,11 +580,11 @@ function Epub:resolveHref(document, href)
                 })
             end
             if wanted == href_key or wanted == path_key then
-                return index - 1, item, data, {
+                return spine_index, item, data, {
                     requested_href = href,
                     wanted = wanted,
                     match = "exact",
-                    matched_index = index - 1,
+                    matched_index = spine_index,
                     matched_href = item.href,
                     matched_path = item.path,
                     spine_count = data.spine and #data.spine or 0,
@@ -584,11 +592,11 @@ function Epub:resolveHref(document, href)
                 }
             end
             if href_key:sub(-#wanted) == wanted or path_key:sub(-#wanted) == wanted then
-                suffix_match = suffix_match or { index - 1, item, data, {
+                suffix_match = suffix_match or { spine_index, item, data, {
                     requested_href = href,
                     wanted = wanted,
                     match = "suffix",
-                    matched_index = index - 1,
+                    matched_index = spine_index,
                     matched_href = item.href,
                     matched_path = item.path,
                     spine_count = data.spine and #data.spine or 0,
@@ -753,7 +761,10 @@ function Epub:xpointerToLocator(document, xpointer, total_progression, format)
         return nil
     end
     local data = self:getSpine(document)
-    local item = data and data.reading_order and data.reading_order[chapter_index + 1]
+    local item = data and data.spine and data.spine[chapter_index + 1]
+    if not isReadableSpineItem(item) then
+        item = data and data.reading_order and data.reading_order[chapter_index + 1]
+    end
     if not isReadableSpineItem(item) then
         return self:totalProgressionToLocator(document, total_progression)
     end
@@ -832,7 +843,8 @@ function Epub:totalProgressionToXPointer(document, total_progression)
         if index > #reading_order then
             index = #reading_order
         end
-        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/", index))
+        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/",
+            docFragmentNumber(reading_order[index], index - 1)))
     end
 
     local target_offset = math.floor(total_length * target)
@@ -848,7 +860,8 @@ function Epub:totalProgressionToXPointer(document, total_progression)
 
     if not selected or not selected.root then
         local chapter_index = selected and selected.index or 0
-        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/", chapter_index + 1))
+        return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body/",
+            docFragmentNumber(reading_order[chapter_index + 1], chapter_index)))
     end
     local offset = target_offset - consumed
     if offset < 0 then
@@ -857,7 +870,8 @@ function Epub:totalProgressionToXPointer(document, total_progression)
         offset = selected.length
     end
     local xpath = offsetToXPath(selected.root, offset)
-    return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body%s", selected.index + 1, xpath))
+    return normalizeXPointer(document, string.format("/body/DocFragment[%d]/body%s",
+        docFragmentNumber(reading_order[selected.index + 1], selected.index), xpath))
 end
 
 function Epub:locatorToXPointer(document, locator, validator)

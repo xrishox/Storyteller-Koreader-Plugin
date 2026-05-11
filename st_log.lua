@@ -61,12 +61,12 @@ function Log:setConfig(config)
 end
 
 function Log:effectiveVerbosity()
+    if fileExists(DataStorage:getSettingsDir() .. "/storyteller.debug") then
+        return "info"
+    end
     local configured = self.config and self.config:get("log_verbosity")
     if LEVELS[configured] then
         return configured
-    end
-    if fileExists(DataStorage:getSettingsDir() .. "/storyteller.debug") then
-        return "info"
     end
     return "warn"
 end

@@ -57,15 +57,21 @@ function Browser:new(plugin)
 end
 
 function Browser:open()
-    local menu = Menu:new{
-        title = "Storyteller",
-        item_table = {
-            { text = "Loading...", dim = true, select_enabled = false },
-        },
-    }
-    self.menu = menu
-    UIManager:show(menu)
-    NetworkMgr:runWhenOnline(function()
+    local server_url = self.plugin.config:get("server_url")
+    local user_id = self.plugin.config:get("user_id")
+    NetworkMgr:runWhenConnected(function()
+        if self.plugin.config:get("server_url") ~= server_url
+                or self.plugin.config:get("user_id") ~= user_id then
+            return
+        end
+        local menu = Menu:new{
+            title = "Storyteller",
+            item_table = {
+                { text = "Loading...", dim = true, select_enabled = false },
+            },
+        }
+        self.menu = menu
+        UIManager:show(menu)
         self:load()
     end)
 end
@@ -80,6 +86,11 @@ function Browser:load()
             collections = collections_result.kind,
             series = series_result.kind,
         })
+        if self.menu then
+            self.menu:switchItemTable("Storyteller", {
+                { text = "Failed to load Storyteller library data.", dim = true, select_enabled = false },
+            })
+        end
         UIManager:show(InfoMessage:new{ text = "Failed to load Storyteller library data." })
         return
     end

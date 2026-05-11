@@ -20,14 +20,23 @@ local REQUIRED_STRINGS = {
 }
 
 local function isFile(path)
+    if type(path) ~= "string" or path == "" then
+        return false
+    end
     return lfs.attributes(path, "mode") == "file"
 end
 
 local function isDir(path)
+    if type(path) ~= "string" or path == "" then
+        return false
+    end
     return lfs.attributes(path, "mode") == "directory"
 end
 
 local function fileSize(path)
+    if type(path) ~= "string" or path == "" then
+        return nil
+    end
     return lfs.attributes(path, "size")
 end
 
@@ -37,15 +46,20 @@ local function ensureDir(path)
     end
     local parent = path:match("^(.*)/[^/]+$")
     if parent and parent ~= path and parent ~= "" then
-        ensureDir(parent)
+        if not ensureDir(parent) then
+            return false
+        end
     end
     if isDir(path) then
         return true
     end
-    return lfs.mkdir(path)
+    return lfs.mkdir(path) == true
 end
 
 function Sidecar:pathFor(filepath)
+    if type(filepath) ~= "string" or filepath == "" then
+        return nil
+    end
     local dir = DocSettings:getSidecarDir(filepath)
     if dir == "" then
         return nil
@@ -58,7 +72,13 @@ function Sidecar:open(filepath)
     if not path then
         return nil
     end
-    return LuaSettings:open(path)
+    local ok, settings = pcall(function()
+        return LuaSettings:open(path)
+    end)
+    if ok then
+        return settings
+    end
+    return nil
 end
 
 function Sidecar:read(filepath)
@@ -66,16 +86,13 @@ function Sidecar:read(filepath)
     if not path or not isFile(path) then
         return nil
     end
-    return LuaSettings:open(path).data, path
-end
-
-function Sidecar:remove(filepath)
-    local path = self:pathFor(filepath)
-    if not path then
-        return
+    local ok, settings = pcall(function()
+        return LuaSettings:open(path)
+    end)
+    if ok and settings then
+        return settings.data, path
     end
-    os.remove(path)
-    os.remove(path .. ".old")
+    return nil
 end
 
 function Sidecar:writeFull(filepath, data, remove_old)
@@ -84,14 +101,26 @@ function Sidecar:writeFull(filepath, data, remove_old)
         return false
     end
     local dir = path:match("^(.*)/[^/]+$")
-    ensureDir(dir)
+    if dir and not ensureDir(dir) then
+        return false
+    end
     if remove_old then
         os.remove(path)
         os.remove(path .. ".old")
     end
-    local settings = LuaSettings:open(path)
+    local ok, settings = pcall(function()
+        return LuaSettings:open(path)
+    end)
+    if not ok or not settings then
+        return false
+    end
     settings.data = data
-    settings:flush()
+    local flushed_ok, flushed = pcall(function()
+        return settings:flush()
+    end)
+    if not flushed_ok or flushed == false then
+        return false
+    end
     return true
 end
 
@@ -103,8 +132,10 @@ function Sidecar:updateSyncFields(filepath, timestamp, source, locator)
     settings.data.last_sync_timestamp = timestamp
     settings.data.last_sync_source = source
     settings.data.last_sync_locator_summary = Models.locatorSummary(locator)
-    settings:flush()
-    return true
+    local ok, flushed = pcall(function()
+        return settings:flush()
+    end)
+    return ok and flushed ~= false
 end
 
 function Sidecar:identityFrom(config, book, format)
@@ -129,7 +160,6 @@ function Sidecar:identityMatches(sidecar, identity)
         and sidecar.user_id == identity.user_id
         and sidecar.book_uuid == identity.book_uuid
         and sidecar.format == identity.format
-        and sidecar.asset_uuid == identity.asset_uuid
 end
 
 function Sidecar:build(config, filepath, book, format, downloaded_hash)
@@ -185,6 +215,9 @@ function Sidecar:validate(filepath, config)
 end
 
 function Sidecar:assetFresh(sidecar, book)
+    if type(sidecar) ~= "table" then
+        return false
+    end
     local relation = Models.getAssetRelation(book, sidecar and sidecar.format)
     if not relation then
         return false
