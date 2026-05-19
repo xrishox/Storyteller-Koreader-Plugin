@@ -8,14 +8,73 @@ local Models = require("st_models")
 local Locator = {}
 
 local function currentTotalProgress(ui)
-    if ui and ui.document and ui.document.info and ui.document.info.has_pages then
-        if ui.paging and ui.paging.getLastPercent then
-            return ui.paging:getLastPercent() or 0
+    if not ui then
+        return 0
+    end
+    if ui.paging and ui.paging.getLastPercent then
+        local ok, percent = pcall(function()
+            return ui.paging:getLastPercent()
+        end)
+        if ok and percent then
+            return percent
         end
-    elseif ui and ui.rolling and ui.rolling.getLastPercent then
-        return ui.rolling:getLastPercent() or 0
+    end
+    if ui.rolling and ui.rolling.getLastPercent then
+        local ok, percent = pcall(function()
+            return ui.rolling:getLastPercent()
+        end)
+        if ok and percent then
+            return percent
+        end
+    end
+    if ui.document and ui.document.getCurrentPage and ui.document.getPageCount then
+        local ok, page, page_count = pcall(function()
+            return ui.document:getCurrentPage(), ui.document:getPageCount()
+        end)
+        page = tonumber(page)
+        page_count = tonumber(page_count)
+        if ok and page and page_count and page_count > 0 then
+            return page / page_count
+        end
     end
     return 0
+end
+
+local function currentXPointer(ui)
+    if not ui or not ui.document then
+        return nil
+    end
+    if ui.rolling and ui.rolling.getLastProgress then
+        local ok, xpointer = pcall(function()
+            return ui.rolling:getLastProgress()
+        end)
+        if ok and type(xpointer) == "string" and xpointer ~= "" then
+            return xpointer
+        end
+    end
+    if ui.document.getPageXPointer then
+        local page
+        local ok = pcall(function()
+            page = ui.getCurrentPage and ui:getCurrentPage() or ui.document:getCurrentPage()
+        end)
+        if ok and page then
+            local xpointer_ok, xpointer = pcall(function()
+                return ui.document:getPageXPointer(page)
+            end)
+            if xpointer_ok and type(xpointer) == "string" and xpointer ~= "" then
+                return xpointer
+            end
+        end
+    end
+    if ui.document.getXPointer then
+        local ok, xpointer = pcall(function()
+            return ui.document:getXPointer()
+        end)
+        if ok and type(xpointer) == "string" and xpointer ~= "" then
+            return xpointer
+        end
+    end
+    return nil
 end
 
 function Locator:build(ui, sidecar, timestamp)
@@ -28,10 +87,10 @@ function Locator:build(ui, sidecar, timestamp)
         },
     }
 
-    if ui and ui.document and ui.document.info and not ui.document.info.has_pages
-            and ui.rolling and ui.rolling.getLastProgress then
-        local xpointer = ui.rolling:getLastProgress()
+    if ui and ui.document then
+        local xpointer = currentXPointer(ui)
         local epub_locator = Epub:xpointerToLocator(ui.document, xpointer, total_progression, sidecar and sidecar.format)
+            or Epub:totalProgressionToLocator(ui.document, total_progression, sidecar and sidecar.format)
         if epub_locator then
             locator = epub_locator
         end

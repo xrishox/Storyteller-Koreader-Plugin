@@ -305,6 +305,34 @@ function Storyteller:onPageUpdate(page)
     self.sync:onPageUpdate(page)
 end
 
+function Storyteller:onGotoPage()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoXPointer()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoPercent()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoPercentage()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoRelativePage()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoNextChapter()
+    self.sync:onNavigation()
+end
+
+function Storyteller:onGotoPrevChapter()
+    self.sync:onNavigation()
+end
+
 function Storyteller:onStorytellerPushProgress()
     self.sync:manualPush()
 end
