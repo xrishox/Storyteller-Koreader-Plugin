@@ -60,8 +60,17 @@ function Log:setConfig(config)
     self.config = config
 end
 
+local DEBUG_FILE_CHECK_TTL_SECONDS = 30
+
 function Log:effectiveVerbosity()
-    if fileExists(DataStorage:getSettingsDir() .. "/storyteller.debug") then
+    -- Cache the debug-file stat: this runs on every log call, including
+    -- suppressed ones, and filesystem stats are slow on e-reader storage.
+    local now = os.time()
+    if not self.debug_checked_at or now - self.debug_checked_at >= DEBUG_FILE_CHECK_TTL_SECONDS then
+        self.debug_checked_at = now
+        self.debug_file_present = fileExists(DataStorage:getSettingsDir() .. "/storyteller.debug")
+    end
+    if self.debug_file_present then
         return "info"
     end
     local configured = self.config and self.config:get("log_verbosity")

@@ -5,6 +5,19 @@ local Models = require("st_models")
 local Epub = {}
 
 local SPINE_CACHE = setmetatable({}, { __mode = "k" })
+-- Parsed chapter trees and SMIL fragments per document, keyed weakly so they
+-- are freed when the document closes. Parsing a chapter is far too slow to
+-- repeat on every sync push.
+local CHAPTER_CACHE = setmetatable({}, { __mode = "k" })
+
+local function documentCache(document)
+    local cache = CHAPTER_CACHE[document]
+    if not cache then
+        cache = {}
+        CHAPTER_CACHE[document] = cache
+    end
+    return cache
+end
 
 local NAMED_ENTITIES = {
     amp = "&",
@@ -618,28 +631,57 @@ function Epub:resolveHref(document, href)
     }
 end
 
+-- On a cache hit the html return value is nil; every caller only uses the
+-- parsed tree (second return value).
 function Epub:readChapter(document, item)
-    local html = item and readDocumentFile(document, item.path)
-    if not html and item then
+    if not item then
+        return nil
+    end
+    local key = item.path or item.href
+    local cache = key and documentCache(document)
+    if cache then
+        local cached = cache[key]
+        if cached == false then
+            return nil
+        elseif cached ~= nil then
+            return nil, cached
+        end
+    end
+    local html = readDocumentFile(document, item.path)
+    if not html then
         html = readDocumentFile(document, item.href)
     end
     if not html then
+        if cache then
+            cache[key] = false
+        end
         return nil
     end
-    return html, parseBodyTree(html)
+    local root = parseBodyTree(html)
+    if cache then
+        cache[key] = root
+    end
+    return html, root
 end
 
 local function smilFragments(document, data, item)
     if not item or not item.media_overlay then
         return {}
     end
+    local cache_key = "smil:" .. tostring(item.path or item.href or item.media_overlay)
+    local cache = documentCache(document)
+    if cache[cache_key] then
+        return cache[cache_key]
+    end
     local overlay = data.manifest_by_id[item.media_overlay]
     if not overlay then
-        return {}
+        cache[cache_key] = {}
+        return cache[cache_key]
     end
     local smil = readDocumentFile(document, overlay.path) or readDocumentFile(document, overlay.href)
     if not smil then
-        return {}
+        cache[cache_key] = {}
+        return cache[cache_key]
     end
     local smil_dir = dirname(overlay.path)
     local chapter_href = hrefKey(item.href)
@@ -656,6 +698,7 @@ local function smilFragments(document, data, item)
             end
         end
     end
+    cache[cache_key] = fragments
     return fragments
 end
 

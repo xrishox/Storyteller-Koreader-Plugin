@@ -103,33 +103,63 @@ function Downloader:firstAvailableDisambiguatedPath(book, format, dir)
     return nil
 end
 
-function Downloader:findExisting(book, format, dir)
+-- Set of entry names in dir, for reuse across many findExisting() calls.
+function Downloader:listDirNames(dir)
+    local names = {}
+    if not isDir(dir) then
+        return names
+    end
+    local ok, iter, dir_obj = pcall(lfs.dir, dir)
+    if not ok then
+        return names
+    end
+    for name in iter, dir_obj do
+        names[name] = true
+    end
+    return names
+end
+
+function Downloader:findExisting(book, format, dir, dir_names)
     local identity = Sidecar:identityFrom(self.plugin.config, book, format)
     if not identity then
         return nil
     end
     local relation = Models.getAssetRelation(book, format)
-    local normal_path = self:pathFor(book, format, nil, dir)
-    local paths = { normal_path }
-    local uuid = tostring(book.uuid or "")
-    for len = 3, #uuid do
-        table.insert(paths, self:pathFor(book, format, uuid:sub(1, len), dir))
+    dir = dir or self:defaultDir()
+    if type(dir) ~= "string" or dir == "" then
+        return nil
     end
-    for n = 2, 999 do
-        table.insert(paths, self:pathFor(book, format, uuid .. "-" .. tostring(n), dir))
+    dir_names = dir_names or self:listDirNames(dir)
+    local normal_name = self:filename(book, format)
+    local normal_path = joinPath(dir, normal_name)
+    -- Disambiguated downloads are "<title> [<tag>-<disambiguator>].epub":
+    -- the normal name with "-<disambiguator>" spliced in before the "]".
+    local disamb_prefix = normal_name:sub(1, -#"].epub" - 1) .. "-"
+    local candidates = {}
+    if dir_names[normal_name] then
+        table.insert(candidates, normal_name)
     end
-    for _, path in ipairs(paths) do
-        if isFile(path) then
-            local data = Sidecar:read(path)
-            if Sidecar:identityMatches(data, identity) then
-                if data.asset_uuid == relation.uuid and data.asset_updated_at == relation.updatedAt then
-                    return path, "fresh"
-                end
-                return path, "stale"
-            end
+    local disambiguated = {}
+    for name in pairs(dir_names) do
+        if name:sub(1, #disamb_prefix) == disamb_prefix and name:sub(-#"].epub") == "].epub" then
+            table.insert(disambiguated, name)
         end
     end
-    if isFile(normal_path) then
+    table.sort(disambiguated)
+    for _, name in ipairs(disambiguated) do
+        table.insert(candidates, name)
+    end
+    for _, name in ipairs(candidates) do
+        local path = joinPath(dir, name)
+        local data = Sidecar:read(path)
+        if Sidecar:identityMatches(data, identity) then
+            if data.asset_uuid == relation.uuid and data.asset_updated_at == relation.updatedAt then
+                return path, "fresh"
+            end
+            return path, "stale"
+        end
+    end
+    if dir_names[normal_name] and isFile(normal_path) then
         return normal_path, "collision"
     end
     return nil

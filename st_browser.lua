@@ -209,13 +209,18 @@ end
 
 function Browser:showRecentlyAdded()
     local books = copyFilteredBooks(self.books, function() return true end)
+    -- Precompute sort keys: parseDate's os.time{} is far too slow to run per comparison.
+    local created = {}
+    local titles = {}
+    for _, book in ipairs(books) do
+        created[book] = Models.parseDate(book.createdAt)
+        titles[book] = Models.lowerTitle(book)
+    end
     table.sort(books, function(a, b)
-        local at = Models.parseDate(a.createdAt)
-        local bt = Models.parseDate(b.createdAt)
-        if at == bt then
-            return Models.lowerTitle(a) < Models.lowerTitle(b)
+        if created[a] == created[b] then
+            return titles[a] < titles[b]
         end
-        return at > bt
+        return created[a] > created[b]
     end)
     self:showBookList("Recently Added", books)
 end
