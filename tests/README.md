@@ -1,6 +1,6 @@
 # Running the compatibility regressions
 
-Run from the plugin repository root with Python 3, LuaJIT, LuaSocket/LuaSec, RapidJSON and LuaFileSystem available. Point at an extracted KOReader v2026.07.2 package and the SimpleUI fork checkout at `v2.7.1-storyteller.1`. Apply [the optional adapter](../docs/simpleui-background-loading.patch) to that checkout before running the full suite, which includes background-loading tests:
+Run from the plugin repository root with Python 3, LuaJIT, LuaSocket/LuaSec, RapidJSON and LuaFileSystem available. Point at an extracted KOReader v2026.07.2 package and the SimpleUI fork checkout at `v2.7.1-storyteller.2` (the background-loading adapter is included in that release):
 
 ```sh
 export KOREADER_ROOT=/path/to/koreader
