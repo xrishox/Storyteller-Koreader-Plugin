@@ -162,9 +162,14 @@ function Storyteller:saveServerUrl(input, after)
         return
     end
     local function save()
-        self.config:set("server_url", normalized ~= "" and normalized or nil)
+        if self.config:get("server_url") ~= (normalized ~= "" and normalized or nil) then
+            self.auth:clear()
+            self.auth:closeDialog()
+            self.sync:stopAuto(false)
+        end
+        local saved = self.config:setServerUrl(normalized)
         if after then
-            after(true)
+            after(saved ~= nil)
         end
     end
     if normalized:match("^http://") then
@@ -275,8 +280,7 @@ function Storyteller:confirmUnlink()
             self.auth:clear()
             self.auth:closeDialog()
             self.sync:stopAuto(false)
-            self.config:clearAuth()
-            show("Device unlinked.")
+            if self.config:clearAuth() then show("Device unlinked.") end
         end,
     })
 end
@@ -314,6 +318,10 @@ function Storyteller:onStorytellerFetchProgress()
 end
 
 function Storyteller:onCloseWidget()
+    self.api:cancel()
+    self.api:cancel(self.browser)
+    self.api:cancel(self.downloader)
+    self.config:flush()
     if self.auth then
         self.auth:clear()
         self.auth:closeDialog()

@@ -32,6 +32,7 @@ function Locator:build(ui, sidecar, timestamp)
             and ui.rolling and ui.rolling.getLastProgress then
         local xpointer = ui.rolling:getLastProgress()
         local epub_locator = Epub:xpointerToLocator(ui.document, xpointer, total_progression, sidecar and sidecar.format)
+            or Epub:totalProgressionToLocator(ui.document, total_progression)
         if epub_locator then
             locator = epub_locator
         end

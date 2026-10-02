@@ -6,7 +6,35 @@ local lfs = require("libs/libkoreader-lfs")
 
 local Models = require("st_models")
 
+local Storage = require("st_storage")
+
 local Sidecar = {}
+local verified_files = {}
+local pending_writes = {}
+
+local function fileHashMatches(filepath, expected)
+    local stat = lfs.attributes(filepath)
+    if not stat or type(expected) ~= "string" or #expected ~= 64 or not expected:match("^%x+$") then
+        return false
+    end
+    local signature = table.concat({stat.size, stat.modification, stat.change or 0, stat.ino or 0}, ":")
+    local cached = verified_files[filepath]
+    if cached and cached.signature == signature and cached.hash == expected then return true end
+    local file = io.open(filepath, "rb")
+    if not file then return false end
+    local hash = require("ffi/sha2").sha256()
+    local bytes = 0
+    while true do
+        local chunk = file:read(65536)
+        if not chunk then break end
+        bytes = bytes + #chunk
+        hash(chunk)
+    end
+    file:close()
+    if bytes ~= stat.size or hash() ~= expected:lower() then return false end
+    verified_files[filepath] = {signature = signature, hash = expected}
+    return true
+end
 
 local REQUIRED_STRINGS = {
     "server_url",
@@ -72,20 +100,20 @@ function Sidecar:open(filepath)
     if not path then
         return nil
     end
-    local ok, settings = pcall(function()
-        return LuaSettings:open(path)
-    end)
-    if ok then
-        return settings
-    end
-    return nil
+    local data = self:read(filepath)
+    return data and { data = data } or nil
 end
 
 function Sidecar:read(filepath)
+    if not self:recoverDownload(filepath) then return nil end
     local path = self:pathFor(filepath)
-    if not path or not isFile(path) then
-        return nil
+    if not path then return nil end
+    if pending_writes[path] then
+        local data = pending_writes[path]
+        if Storage:write(path, data) then pending_writes[path] = nil end
+        return data, path
     end
+    if not isFile(path) then return nil end
     local ok, settings = pcall(function()
         return LuaSettings:open(path)
     end)
@@ -104,27 +132,48 @@ function Sidecar:writeFull(filepath, data, remove_old)
     if dir and not ensureDir(dir) then
         return false
     end
-    if remove_old then
-        os.remove(path)
-        os.remove(path .. ".old")
+    local ok, err = Storage:write(path, data)
+    pending_writes[path] = not ok and data or nil
+    if ok then os.remove(path .. ".old") end
+    return ok, err
+end
+
+-- Journal new metadata before committing the EPUB. No old-book backup is created.
+function Sidecar:commitDownload(filepath, temporary, data)
+    local path = self:pathFor(filepath)
+    if not path then return false, "sidecar_path" end
+    local dir = path:match("^(.*)/[^/]+$")
+    if not ensureDir(dir) then return false, "sidecar_directory" end
+    local journal = path .. ".pending"
+    local ok, err = Storage:write(journal, data)
+    if not ok then return false, err end
+    if not os.rename(temporary, filepath) then
+        os.remove(journal)
+        return false, "book_commit_failed"
     end
-    local ok, settings = pcall(function()
-        return LuaSettings:open(path)
-    end)
-    if not ok or not settings then
-        return false
-    end
-    settings.data = data
-    local flushed_ok, flushed = pcall(function()
-        return settings:flush()
-    end)
-    if not flushed_ok or flushed == false then
-        return false
-    end
+    verified_files[filepath] = nil
+    if not require("ffi/util").fsyncDirectory(filepath) then return false, "metadata_pending" end
+    if not self:writeFull(filepath, data) then return false, "metadata_pending" end
+    os.remove(journal)
     return true
 end
 
-function Sidecar:updateSyncFields(filepath, timestamp, source, locator)
+function Sidecar:recoverDownload(filepath)
+    local path = self:pathFor(filepath)
+    if not path or not isFile(path .. ".pending") then return true end
+    local data = Storage:read(path .. ".pending")
+    if not data or data.schema_version ~= 1 then return false end
+    if fileHashMatches(filepath, data.downloaded_hash) then
+        if not self:writeFull(filepath, data) then return false end
+    else
+        -- Crash before the EPUB rename: old EPUB and old metadata remain paired.
+        os.remove(filepath .. ".storyteller.tmp")
+    end
+    os.remove(path .. ".pending")
+    return true
+end
+
+function Sidecar:updateSyncFields(filepath, timestamp, source, locator, pending)
     local settings = self:open(filepath)
     if not settings then
         return false
@@ -132,10 +181,15 @@ function Sidecar:updateSyncFields(filepath, timestamp, source, locator)
     settings.data.last_sync_timestamp = timestamp
     settings.data.last_sync_source = source
     settings.data.last_sync_locator_summary = Models.locatorSummary(locator)
-    local ok, flushed = pcall(function()
-        return settings:flush()
-    end)
-    return ok and flushed ~= false
+    settings.data.pending_position = pending
+    return self:writeFull(filepath, settings.data)
+end
+
+function Sidecar:setPendingPosition(filepath, payload)
+    local settings = self:open(filepath)
+    if not settings then return false end
+    settings.data.pending_position = payload
+    return self:writeFull(filepath, settings.data)
 end
 
 function Sidecar:identityFrom(config, book, format)
@@ -210,6 +264,9 @@ function Sidecar:validate(filepath, config)
     end
     if tonumber(data.local_file_size) ~= tonumber(fileSize(filepath)) then
         return false, data, "size_mismatch"
+    end
+    if not fileHashMatches(filepath, data.downloaded_hash) then
+        return false, data, "hash_mismatch"
     end
     return true, data, nil
 end

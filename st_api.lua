@@ -10,6 +10,36 @@ function Api:new(http_client)
     return obj
 end
 
+-- Existing synchronous methods remain stable. UI callers opt into background waits.
+function Api:run(fn, options)
+    local Async = require("st_async")
+    if Async:current() then return fn() end
+    options = options or {}
+    local config = self.http.config
+    local server, user, token = config:get("server_url"), config:get("user_id"), config:get("access_token")
+    return Async:run(options.owner or self, options.key or fn, function()
+        return config:get("server_url") == server and config:get("user_id") == user
+            and config:get("access_token") == token and (not options.guard or options.guard())
+    end, fn, options.finished)
+end
+
+function Api:cancel(owner)
+    require("st_async"):cancel(owner or self)
+end
+
+function Api:whenConnected(fn, options)
+    local config = self.http.config
+    local server, user = config:get("server_url"), config:get("user_id")
+    local token = config:get("access_token")
+    local launch
+    launch = function()
+        if config:get("server_url") ~= server or config:get("user_id") ~= user
+                or config:get("access_token") ~= token or (options and options.guard and not options.guard()) then return end
+        if not self:run(fn, options) then require("ui/uimanager"):scheduleIn(0.1, launch) end
+    end
+    require("ui/network/manager"):runWhenConnected(launch)
+end
+
 local function bookPath(book_uuid, suffix)
     return "/api/v2/books/" .. Models.urlEncode(book_uuid) .. (suffix or "")
 end
@@ -72,6 +102,13 @@ function Api:getPosition(book_uuid)
 end
 
 function Api:savePosition(book_uuid, locator, timestamp)
+    -- A percentage without a publication resource cannot be restored by Readium.
+    if type(locator) ~= "table" or not Models.isNonEmptyString(locator.href)
+            or not Models.isNonEmptyString(locator.type)
+            or type(timestamp) ~= "number" or timestamp ~= timestamp
+            or timestamp <= 0 or timestamp == math.huge then
+        return { ok = false, kind = "invalid_position" }
+    end
     return self.http:request{
         method = "POST",
         path = bookPath(book_uuid, "/positions"),

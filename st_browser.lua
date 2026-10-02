@@ -2,7 +2,6 @@
 
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
-local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 
 local Models = require("st_models")
@@ -59,7 +58,7 @@ end
 function Browser:open()
     local server_url = self.plugin.config:get("server_url")
     local user_id = self.plugin.config:get("user_id")
-    NetworkMgr:runWhenConnected(function()
+    self.plugin.api:whenConnected(function()
         if self.plugin.config:get("server_url") ~= server_url
                 or self.plugin.config:get("user_id") ~= user_id then
             return
@@ -70,10 +69,15 @@ function Browser:open()
                 { text = "Loading...", dim = true, select_enabled = false },
             },
         }
+        menu.close_callback = function()
+            self.menu = nil
+            require("st_async"):cancel(self)
+            UIManager:close(menu)
+        end
         self.menu = menu
         UIManager:show(menu)
         self:load()
-    end)
+    end, {owner=self,key="library"})
 end
 
 function Browser:load()

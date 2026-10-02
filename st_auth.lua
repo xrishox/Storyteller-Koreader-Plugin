@@ -2,7 +2,6 @@
 
 local ButtonDialog = require("ui/widget/buttondialog")
 local InfoMessage = require("ui/widget/infomessage")
-local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 
@@ -22,11 +21,14 @@ function Auth:new(plugin)
 end
 
 function Auth:clear()
+    self.generation = (self.generation or 0) + 1
+    require("st_async"):cancel(self)
     if self.task then
         UIManager:unschedule(self.task)
     end
     self.task = nil
     self.device_code = nil
+    self.server_url = nil
     self.interval = 5
     self.expires_at = nil
 end
@@ -64,6 +66,13 @@ function Auth:showWaitingDialog(data)
     UIManager:show(dialog)
 end
 
+function Auth:whenConnected(fn)
+    local generation = self.generation
+    return self.plugin.api:whenConnected(fn, {owner=self, key="auth", guard=function()
+        return self.generation == generation
+    end})
+end
+
 function Auth:start()
     local config = self.plugin.config
     if not config:get("server_url") then
@@ -75,7 +84,7 @@ function Auth:start()
         return
     end
     local server_url = config:get("server_url")
-    NetworkMgr:runWhenConnected(function()
+    self:whenConnected(function()
         if self.plugin.config:get("server_url") ~= server_url then
             return
         end
@@ -88,8 +97,9 @@ function Auth:start()
             return
         end
         self.device_code = result.data.device_code
-        self.interval = tonumber(result.data.interval) or 5
-        self.expires_at = os.time() + (tonumber(result.data.expires_in) or 600)
+        self.server_url = server_url
+        self.interval = math.max(1, tonumber(result.data.interval) or 5)
+        self.expires_at = os.time() + math.max(1, tonumber(result.data.expires_in) or 600)
         self:showWaitingDialog(result.data)
         self:schedulePoll(0)
     end)
@@ -117,8 +127,13 @@ function Auth:poll()
         return
     end
     local device_code = self.device_code
-    NetworkMgr:runWhenConnected(function()
+    self:whenConnected(function()
         if self.device_code ~= device_code then
+            return
+        end
+        if self.plugin.config:get("server_url") ~= self.server_url then
+            self:clear()
+            self:closeDialog()
             return
         end
         local result = self.plugin.api:deviceToken(device_code)
@@ -168,7 +183,11 @@ function Auth:onToken(token_response)
         self:showMessage("Failed to verify Storyteller user.")
         return
     end
-    self.plugin.config:saveAuth(token_response, user_result.data)
+    if not self.plugin.config:saveAuth(token_response, user_result.data) then
+        self:clear()
+        self:closeDialog()
+        return
+    end
     self:clear()
     self:closeDialog()
     self:showMessage("Device linked successfully!")

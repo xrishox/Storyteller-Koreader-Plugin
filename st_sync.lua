@@ -10,6 +10,8 @@ local Locator = require("st_locator")
 local Models = require("st_models")
 local Sidecar = require("st_sidecar")
 
+local Async = require("st_async")
+
 local Sync = {}
 
 local INELIGIBLE = "This book was not downloaded from Storyteller."
@@ -91,22 +93,40 @@ function Sync:logPositionPayload(event_name, payload, extra)
     self.plugin.log:info(event_name, data)
 end
 
+function Sync:storageFailure(text)
+    if not self.storage_error_shown then
+        self.storage_error_shown = true
+        show(text)
+    end
+end
+
 function Sync:updateSidecarSyncFields(filepath, timestamp, source, locator)
     local ok = Sidecar:updateSyncFields(filepath, timestamp, source, locator)
     if not ok then
         self.plugin.log:warn("sidecar_sync_update_failed", { source = source })
+        self:storageFailure("Could not save the local sync record. Check storage space and access.")
     end
     return ok
 end
 
 function Sync:recordLocalPushSuccess(filepath, sidecar, payload)
-    self:updateSidecarSyncFields(filepath, payload.timestamp, "local_push", payload.locator)
-    self:clearPendingProgress()
+    local unchanged = (payload.local_revision or 0) == (self.progress_revision or 0)
+    local pending = not unchanged and self:hasPendingProgress() and self:pendingPayload(sidecar) or nil
+    if not Sidecar:updateSyncFields(filepath, payload.timestamp, "local_push", payload.locator, pending) then
+        self.pending_ack = {filepath=filepath, sidecar=sidecar, payload=payload}
+        self:storageFailure("Position sent, but its local sync record could not be saved. It will be retried. Check storage space and access.")
+        return false
+    end
+    self.pending_ack = nil
+    self.storage_error_shown = false
+    if unchanged then self:clearPendingProgress() end
     if self.sidecar and self.filepath == filepath then
         self.sidecar = sidecar
         self.sidecar.last_sync_timestamp = payload.timestamp
         self.last_auto_push_timestamp = Models.nowMs()
+        if self:hasPendingProgress() then self:schedulePush() end
     end
+    return true
 end
 
 function Sync:hasPendingProgress()
@@ -137,7 +157,19 @@ function Sync:clearPendingProgress()
     self.pending_progress_changed_at = nil
 end
 
+function Sync:persistPendingProgress()
+    if not self.filepath or not self:hasPendingProgress() then return end
+    local valid, sidecar = Sidecar:validate(self.filepath, self.plugin.config)
+    if not valid then return end
+    local payload = self:pendingPayload(sidecar)
+    if not Sidecar:setPendingPosition(self.filepath, payload) then
+        self.plugin.log:warn("pending_position_save_failed")
+        self:storageFailure("Could not save unsent Storyteller progress. Keep KOReader open and check storage space and access.")
+    end
+end
+
 function Sync:markPendingProgress()
+    self.progress_revision = (self.progress_revision or 0) + 1
     local now = Models.nowMs()
     self:unscheduleRemoteCheck()
     self.pending_progress_payload = nil
@@ -151,7 +183,7 @@ function Sync:pendingPayload(sidecar)
         return self.pending_progress_payload
     end
     local timestamp = self.pending_progress_changed_at or Models.nowMs()
-    self.pending_progress_payload = Locator:build(self.plugin.ui, sidecar, timestamp)
+    self.pending_progress_payload = self:buildPayload(sidecar, timestamp)
     return self.pending_progress_payload
 end
 
@@ -159,7 +191,7 @@ function Sync:comparisonPayload(sidecar)
     if self:hasPendingProgress() then
         return self:pendingPayload(sidecar)
     end
-    return Locator:build(self.plugin.ui, sidecar, Models.nowMs())
+    return self:buildPayload(sidecar, Models.nowMs())
 end
 
 function Sync:remoteDecision(sidecar, local_payload, remote, source)
@@ -169,15 +201,17 @@ function Sync:remoteDecision(sidecar, local_payload, remote, source)
     local decision = "local_current"
     local reason = progress_state == "same" and "same_progress" or "unknown_progress"
 
-    if progress_state == "remote_ahead" then
+    -- Reading backward is a legitimate update too. Never rank distance ahead
+    -- of a server change we have not acknowledged.
+    if remote_ts > last_ts then
+        decision = "remote_newer"
+        reason = "timestamp"
+    elseif progress_state == "remote_ahead" then
         decision = "remote_ahead"
         reason = "progress"
     elseif progress_state == "local_ahead" then
         decision = "local_ahead"
         reason = "progress"
-    elseif remote_ts > last_ts then
-        decision = "remote_newer"
-        reason = "timestamp"
     end
 
     local details = {
@@ -208,12 +242,6 @@ function Sync:checkRemoteBeforeLocalPush(sidecar, payload, reason)
                     decision = decision,
                     remote = remote.data,
                 }
-            end
-            if decision == "local_ahead" then
-                payload.timestamp = Models.nowMs()
-                if self.pending_progress_payload == payload then
-                    self.pending_progress_changed_at = payload.timestamp
-                end
             end
             return true, { kind = decision }
         end
@@ -262,26 +290,7 @@ function Sync:handleSaveConflict(sidecar, filepath, payload, source, manual)
     end
 
     local decision = self:remoteDecision(sidecar, payload, remote.data, source or "save_conflict")
-    if decision == "local_ahead" then
-        payload.timestamp = Models.nowMs()
-        self:logPositionPayload("position_push_payload", payload, {
-            source = (source or "save_conflict") .. "_retry",
-        })
-        local retry = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
-        if retry.ok then
-            self:recordLocalPushSuccess(filepath, sidecar, payload)
-            if manual then
-                show("Reading position pushed.")
-            end
-            return true
-        end
-        self.plugin.log:warn("position_push_conflict_retry_failed", retry)
-        if manual then
-            show("Failed to push reading position.")
-        end
-        return false
-    end
-
+    -- A 409 must be resolved by the reader, never by manufacturing a timestamp.
     local conflict_kind = decision == "remote_ahead" and "remote_ahead" or "remote_newer"
     self:showConflict(remote.data, filepath, payload, conflict_kind)
     return false
@@ -313,6 +322,36 @@ function Sync:new(plugin)
     }
     setmetatable(obj, { __index = self })
     return obj
+end
+
+function Sync:networkOptions()
+    local generation, filepath = self.generation, self:documentFile()
+    return {owner=self,key="sync",guard=function()
+        return not self.suspended and self.generation == generation and self:documentFile() == filepath
+    end, finished=function()
+        if self.active and not self.suspended and self:hasPendingProgress() then self:schedulePush() end
+    end}
+end
+
+function Sync:runNetwork(fn)
+    if Async:current() then return fn() end
+    local options = self:networkOptions()
+    local launch
+    launch = function()
+        if not options.guard() then return end
+        if not self.plugin.api:run(fn, options) then UIManager:scheduleIn(0.1, launch) end
+    end
+    launch()
+end
+
+function Sync:whenConnected(fn)
+    return self.plugin.api:whenConnected(fn, self:networkOptions())
+end
+
+function Sync:buildPayload(sidecar, timestamp)
+    local payload = Locator:build(self.plugin.ui, sidecar, timestamp)
+    payload.local_revision = self.progress_revision or 0
+    return payload
 end
 
 function Sync:documentFile()
@@ -406,52 +445,52 @@ function Sync:manualPush()
     if not sidecar then
         return
     end
-    NetworkMgr:runWhenConnected(function()
+    self:whenConnected(function()
         local msg = InfoMessage:new{ text = "Pushing reading position..." }
         UIManager:show(msg)
+        local close_message = Async:trackWidget(msg)
         UIManager:forceRePaint()
         if self:documentFile() ~= filepath then
-            UIManager:close(msg)
+            close_message()
             show("Failed to push reading position.")
             return
         end
         local valid, fresh_sidecar = Sidecar:validate(filepath, self.plugin.config)
         if not valid then
-            UIManager:close(msg)
+            close_message()
             show(INELIGIBLE)
             return
         end
         sidecar = fresh_sidecar
         local verified, verify_kind = self:verifyAsset(sidecar, false)
         if not verified then
-            UIManager:close(msg)
+            close_message()
             self:handleVerifyFailure(verify_kind, true)
             return
         end
         if self:documentFile() ~= filepath then
-            UIManager:close(msg)
+            close_message()
             show("Failed to push reading position.")
             return
         end
-        local payload = Locator:build(self.plugin.ui, sidecar)
+        local payload = self:buildPayload(sidecar)
         local allowed, block = self:checkRemoteBeforeLocalPush(sidecar, payload, "manual_push")
         if not allowed then
-            UIManager:close(msg)
+            close_message()
             self:handlePushRemoteBlock(block, true, "manual_push", filepath, payload)
             return
         end
         if self:documentFile() ~= filepath then
-            UIManager:close(msg)
+            close_message()
             show("Failed to push reading position.")
             return
         end
         self:logPositionPayload("position_push_payload", payload, { source = "manual_push" })
         local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
-        UIManager:close(msg)
+        close_message()
         if result.ok then
             self:unschedulePush()
-            self:recordLocalPushSuccess(filepath, sidecar, payload)
-            show("Reading position pushed.")
+            if self:recordLocalPushSuccess(filepath, sidecar, payload) then show("Reading position pushed.") end
         elseif result.kind == "handled_error" and result.status == 409 then
             self:handleSaveConflict(sidecar, filepath, payload, "manual_push_conflict", true)
         elseif result.kind == "not_authenticated" then
@@ -468,30 +507,31 @@ function Sync:manualFetch()
     if not sidecar then
         return
     end
-    NetworkMgr:runWhenConnected(function()
+    self:whenConnected(function()
         local msg = InfoMessage:new{ text = "Fetching reading position..." }
         UIManager:show(msg)
+        local close_message = Async:trackWidget(msg)
         UIManager:forceRePaint()
         if self:documentFile() ~= filepath then
-            UIManager:close(msg)
+            close_message()
             show("Failed to fetch reading position.")
             return
         end
         local valid, fresh_sidecar = Sidecar:validate(filepath, self.plugin.config)
         if not valid then
-            UIManager:close(msg)
+            close_message()
             show(INELIGIBLE)
             return
         end
         sidecar = fresh_sidecar
         local verified, verify_kind = self:verifyAsset(sidecar, false)
         if not verified then
-            UIManager:close(msg)
+            close_message()
             self:handleVerifyFailure(verify_kind, true)
             return
         end
         local result = self.plugin.api:getPosition(sidecar.book_uuid)
-        UIManager:close(msg)
+        close_message()
         self.plugin.log:info("manual_fetch_position_result", {
             ok = result.ok,
             kind = result.kind,
@@ -577,6 +617,7 @@ function Sync:showConflict(remote, filepath, local_payload, kind)
                 callback = function()
                     self.remote_conflict_pending = false
                     self:clearPendingProgress()
+                    Sidecar:setPendingPosition(filepath or self:documentFile(), nil)
                     self:closeConflictDialog(dialog)
                 end,
             }},
@@ -613,6 +654,7 @@ function Sync:showConflict(remote, filepath, local_payload, kind)
 end
 
 function Sync:pushFreshLocal(filepath)
+    if not Async:current() then return self:runNetwork(function() self:pushFreshLocal(filepath) end) end
     local current_file = self:documentFile()
     if filepath and current_file ~= filepath then
         show("Failed to push reading position.")
@@ -628,12 +670,17 @@ function Sync:pushFreshLocal(filepath)
         show(INELIGIBLE)
         return false
     end
-    local payload = Locator:build(self.plugin.ui, sidecar, Models.nowMs())
+    local verified, verify_kind = self:verifyAsset(sidecar, false)
+    if not verified then
+        self:handleVerifyFailure(verify_kind, true)
+        return false
+    end
+    local payload = self:buildPayload(sidecar, Models.nowMs())
     self:logPositionPayload("position_push_payload", payload, { source = "conflict_keep_local" })
     local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
     if result.ok then
         self:unschedulePush()
-        self:recordLocalPushSuccess(target_file, sidecar, payload)
+        if not self:recordLocalPushSuccess(target_file, sidecar, payload) then return false end
         show("Reading position pushed.")
         return true
     end
@@ -727,21 +774,29 @@ function Sync:startAuto()
     self.sidecar = sidecar
     self.autosync_paused_until_reset = false
     self.last_auto_push_timestamp = 0
-    self.last_page = nil
+    self.last_page = currentDocumentPage(self.plugin.ui)
+    if hasRemotePosition(sidecar.pending_position) then
+        self.pending_progress_payload = sidecar.pending_position
+        self.pending_progress_payload.local_revision = self.progress_revision or 0
+    end
     self.generation = self.generation + 1
     local generation = self.generation
     UIManager:nextTick(function()
         if not self.active or self.generation ~= generation or self.filepath ~= filepath then
             return
         end
-        self:scheduleRemoteCheck("start")
+        if self:hasPendingProgress() then
+            self:schedulePush()
+        else
+            self:scheduleRemoteCheck("start")
+        end
     end)
 end
 
 function Sync:stopAuto(flush)
-    if flush and self:hasPendingProgress() then
-        self:pushProgressIfPossible("close_document")
-    end
+    self:persistPendingProgress()
+    Async:cancel(self)
+    self.pending_ack = nil
     self.active = false
     self.filepath = nil
     self.sidecar = nil
@@ -803,13 +858,17 @@ function Sync:schedulePush()
     local debounce_at = dirty_since + AUTO_SYNC_DEBOUNCE_SECONDS * 1000
     local throttle_at = (self.last_auto_push_timestamp or 0) + AUTO_SYNC_MIN_INTERVAL_SECONDS * 1000
     local run_at = math.max(debounce_at, throttle_at)
-    local delay_seconds = math.max(0, (run_at - now) / 1000)
+    -- An offline/failed attempt also needs a delay: an expired debounce alone
+    -- otherwise reschedules at zero forever and can freeze the UI.
+    local delay_seconds = math.max(1, (run_at - now) / 1000)
     self.progress_push_task = function()
-        self.progress_push_task = nil
-        local pushed = self:pushProgressIfPossible("debounce")
-        if not pushed and self.active and self:hasPendingProgress() then
-            self:schedulePush()
-        end
+        self:runNetwork(function()
+            self.progress_push_task = nil
+            local pushed = self:pushProgressIfPossible("debounce")
+            if not pushed and self.active and self:hasPendingProgress() then
+                self:schedulePush()
+            end
+        end)
     end
     UIManager:scheduleIn(delay_seconds, self.progress_push_task)
 end
@@ -843,92 +902,104 @@ function Sync:scheduleRemoteCheck(reason, attempt, asset_already_verified)
     local generation = self.generation
     local filepath = self.filepath
     self.remote_check_task = function()
-        self.remote_check_task = nil
-        if not self.active or self.generation ~= generation or self.filepath ~= filepath then
-            return
-        end
-        if self.remote_conflict_pending
-                or self.autosync_paused_until_reset
-                or self.autosync_error_dialog
-                or self:hasPendingProgress() then
-            return
-        end
-        if not networkAvailable() then
-            if attempt < #REMOTE_CHECK_RETRY_DELAYS then
-                self.plugin.log:info("remote_check_offline_retry", {
+        self:runNetwork(function()
+            self.remote_check_task = nil
+            if not self.active or self.generation ~= generation or self.filepath ~= filepath then
+                return
+            end
+            if self.remote_conflict_pending
+                    or self.autosync_paused_until_reset
+                    or self.autosync_error_dialog
+                    or self:hasPendingProgress() then
+                return
+            end
+            if not networkAvailable() then
+                if attempt < #REMOTE_CHECK_RETRY_DELAYS then
+                    self.plugin.log:info("remote_check_offline_retry", {
+                        reason = reason,
+                        attempt = attempt,
+                        next_delay = REMOTE_CHECK_RETRY_DELAYS[attempt + 1],
+                    })
+                    self:scheduleRemoteCheck(reason, attempt + 1, asset_already_verified)
+                else
+                    self.plugin.log:info("remote_check_offline_give_up", {
+                        reason = reason,
+                        attempt = attempt,
+                    })
+                end
+                return
+            end
+            local _, status = self:fetchRemoteIfNewer(asset_already_verified, reason, true)
+            if (status == "fetch_failed" or status == "timeout" or status == "transient")
+                    and not self.remote_conflict_pending
+                    and not self.autosync_error_dialog
+                    and attempt < #REMOTE_CHECK_RETRY_DELAYS then
+                self.plugin.log:info("remote_check_retry", {
                     reason = reason,
                     attempt = attempt,
+                    status = status,
                     next_delay = REMOTE_CHECK_RETRY_DELAYS[attempt + 1],
                 })
                 self:scheduleRemoteCheck(reason, attempt + 1, asset_already_verified)
-            else
-                self.plugin.log:info("remote_check_offline_give_up", {
+            elseif (status == "fetch_failed" or status == "timeout" or status == "transient")
+                    and not self.autosync_error_dialog then
+                self.plugin.log:warn("remote_check_give_up", {
                     reason = reason,
                     attempt = attempt,
+                    status = status,
                 })
+                if status == "timeout" then
+                    self:showTimeoutPrompt()
+                end
             end
-            return
-        end
-        local _, status = self:fetchRemoteIfNewer(asset_already_verified, reason, true)
-        if (status == "fetch_failed" or status == "timeout" or status == "transient")
-                and not self.remote_conflict_pending
-                and not self.autosync_error_dialog
-                and attempt < #REMOTE_CHECK_RETRY_DELAYS then
-            self.plugin.log:info("remote_check_retry", {
-                reason = reason,
-                attempt = attempt,
-                status = status,
-                next_delay = REMOTE_CHECK_RETRY_DELAYS[attempt + 1],
-            })
-            self:scheduleRemoteCheck(reason, attempt + 1, asset_already_verified)
-        elseif (status == "fetch_failed" or status == "timeout" or status == "transient")
-                and not self.autosync_error_dialog then
-            self.plugin.log:warn("remote_check_give_up", {
-                reason = reason,
-                attempt = attempt,
-                status = status,
-            })
-            if status == "timeout" then
-                self:showTimeoutPrompt()
-            end
-        end
+        end)
     end
     UIManager:scheduleIn(delay, self.remote_check_task)
 end
 
 function Sync:onCloseDocument()
-    local had_pending = self:hasPendingProgress()
-    self:unscheduleRemoteCheck()
-    self:unschedulePush()
-    if had_pending then
-        if networkAvailable() then
-            self:pushProgressIfPossible("close_document")
-        else
-            local pushed = NetworkMgr:goOnlineToRun(function()
-                self:pushProgressIfPossible("close_document")
-            end)
-            if not pushed then
-                self.plugin.log:warn("autosync_close_flush_skipped", { reason = "network_unavailable" })
+    local filepath, sidecar = self.filepath, self.sidecar
+    local payload = self:hasPendingProgress() and sidecar and self:pendingPayload(sidecar)
+    self:stopAuto(false) -- persist before the reader/document is destroyed
+    if not payload or not networkAvailable() then return end
+    -- Complete a captured close-time upload without accessing the closed reader UI.
+    -- A conflict remains pending for the next open; it never opens a stale dialog.
+    local api, config, log = self.plugin.api, self.plugin.config, self.plugin.log
+    api:run(function()
+        local valid, saved = Sidecar:validate(filepath, config)
+        if not valid then return end
+        local book = api:getBook(saved.book_uuid)
+        if not book.ok or not Sidecar:assetFresh(saved, book.data) then return end
+        local remote = api:getPosition(saved.book_uuid)
+        if remote.ok and hasRemotePosition(remote.data) then
+            local decision = self:remoteDecision(saved, payload, remote.data, "close_document")
+            if decision == "remote_ahead" or decision == "remote_newer" then return end
+        elseif not (remote.kind == "handled_error" and remote.status == 404) then
+            return
+        end
+        local result = api:savePosition(saved.book_uuid, payload.locator, payload.timestamp)
+        if result.ok then
+            local latest = Sidecar:read(filepath)
+            if latest and latest.pending_position and latest.pending_position.timestamp == payload.timestamp then
+                if not Sidecar:updateSyncFields(filepath, payload.timestamp, "local_push", payload.locator) then
+                    log:warn("sidecar_sync_update_failed")
+                end
             end
         end
-    end
-    self:stopAuto(false)
+    end, {owner={},key="close"})
 end
 
 function Sync:onSuspend()
+    self.suspended = true
+    -- Do not keep the device awake waiting for a server. Resume retries the saved update.
     self:unscheduleRemoteCheck()
-    if not self:hasPendingProgress() then
-        return
-    end
     self:unschedulePush()
-    if networkAvailable() then
-        self:pushProgressIfPossible("suspend")
-    else
-        self.plugin.log:info("autosync_suspend_flush_skipped", { reason = "network_unavailable" })
-    end
+    self:persistPendingProgress()
+    Async:cancel(self)
 end
 
 function Sync:onResume()
+    self.suspended = false
     if self.active then
         self.autosync_paused_until_reset = false
         if self:hasPendingProgress() then
@@ -1010,6 +1081,10 @@ function Sync:fetchRemoteIfNewer(asset_already_verified, reason, quiet)
 end
 
 function Sync:pushProgressIfPossible(reason)
+    if self.pending_ack then
+        local ack = self.pending_ack
+        if not self:recordLocalPushSuccess(ack.filepath, ack.sidecar, ack.payload) then return false end
+    end
     if not self.active or not self.sidecar then
         return false
     end
@@ -1057,8 +1132,7 @@ function Sync:pushProgressIfPossible(reason)
     self:logPositionPayload("position_push_payload", payload, { source = "auto_push", reason = reason })
     local result = self.plugin.api:savePosition(sidecar.book_uuid, payload.locator, payload.timestamp)
     if result.ok then
-        self:recordLocalPushSuccess(self.filepath, sidecar, payload)
-        return true
+        return self:recordLocalPushSuccess(self.filepath, sidecar, payload)
     elseif result.kind == "handled_error" and result.status == 409 then
         return self:handleSaveConflict(sidecar, self.filepath, payload, "auto_push_conflict", false)
     elseif result.kind == "timeout" then
@@ -1088,11 +1162,13 @@ function Sync:showTimeoutPrompt()
                     UIManager:close(dialog)
                     self.autosync_error_dialog = nil
                     UIManager:nextTick(function()
-                        if self:hasPendingProgress() then
-                            self:pushProgressIfPossible("timeout_retry")
-                        else
-                            self:scheduleRemoteCheck("timeout_retry")
-                        end
+                        self:runNetwork(function()
+                            if self:hasPendingProgress() then
+                                self:pushProgressIfPossible("timeout_retry")
+                            else
+                                self:scheduleRemoteCheck("timeout_retry")
+                            end
+                        end)
                     end)
                 end,
             }},

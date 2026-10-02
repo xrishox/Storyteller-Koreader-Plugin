@@ -3,7 +3,6 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local InfoMessage = require("ui/widget/infomessage")
 local ReaderUI = require("apps/reader/readerui")
-local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
@@ -328,7 +327,7 @@ function Downloader:download(book, format, final_path, replacing)
     end
     local server_url = self.plugin.config:get("server_url")
     local user_id = self.plugin.config:get("user_id")
-    NetworkMgr:runWhenConnected(function()
+    self.plugin.api:whenConnected(function()
         if self.plugin.config:get("server_url") ~= server_url
                 or self.plugin.config:get("user_id") ~= user_id then
             UIManager:show(InfoMessage:new{ text = "Download failed." })
@@ -361,6 +360,15 @@ function Downloader:download(book, format, final_path, replacing)
         end
         local tmp_path = final_path .. ".storyteller.tmp"
         os.remove(tmp_path)
+        local Async = require("st_async")
+        local dialog = ButtonDialog:new{
+            title = "Downloading from Storyteller...",
+            buttons = {{{text = _("Cancel"), callback = function() Async:cancel(self) end}}},
+            dismissable = false,
+        }
+        UIManager:show(dialog)
+        local close_dialog = Async:trackWidget(dialog)
+        Async:onFinish(function() os.remove(tmp_path) end)
         local result = self.plugin.api:downloadFile(download_book.uuid or book.uuid, format, tmp_path)
         if not result.ok or not result.downloaded_hash then
             os.remove(tmp_path)
@@ -368,21 +376,30 @@ function Downloader:download(book, format, final_path, replacing)
             UIManager:show(InfoMessage:new{ text = "Download failed." })
             return
         end
-        if os.rename(tmp_path, final_path) ~= true then
+        -- Do not associate downloaded bytes with metadata that changed while
+        -- the transfer was in progress (e.g. the server realigned the EPUB).
+        local latest = self.plugin.api:getBook(book.uuid)
+        local latest_relation = latest.ok and Models.getAssetRelation(latest.data, format)
+        if type(latest_relation) ~= "table" or latest_relation.uuid ~= relation.uuid
+                or latest_relation.updatedAt ~= relation.updatedAt
+                or not Models.isDownloadableRelation(latest.data, format) then
             os.remove(tmp_path)
-            UIManager:show(InfoMessage:new{ text = "Download failed." })
+            self.plugin.log:warn("download_asset_changed")
+            UIManager:show(InfoMessage:new{ text = "The Storyteller file changed during download. Please try again." })
             return
         end
-        local sidecar = Sidecar:build(self.plugin.config, final_path, download_book, format, result.downloaded_hash)
-        if not Sidecar:writeFull(final_path, sidecar, replacing) then
-            if not replacing then
-                os.remove(final_path)
-            end
-            UIManager:show(InfoMessage:new{ text = "Download failed." })
+        local sidecar = Sidecar:build(self.plugin.config, tmp_path, download_book, format, result.downloaded_hash)
+        local committed, commit_error = Sidecar:commitDownload(final_path, tmp_path, sidecar)
+        if not committed then
+            os.remove(tmp_path)
+            UIManager:show(InfoMessage:new{ text = commit_error == "metadata_pending"
+                and "Book downloaded, but its details could not be saved. They will be recovered when the book is next opened or browsed. Check free space and storage access."
+                or "Could not save the download. Check free space and storage access." })
             return
         end
+        close_dialog()
         self:downloaded(final_path)
-    end)
+    end, {owner=self,key="download"})
 end
 
 function Downloader:downloaded(path)

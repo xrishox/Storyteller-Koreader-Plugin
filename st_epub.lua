@@ -102,6 +102,8 @@ local function hrefKey(path)
     path = path:gsub("^https?://[^/]+/api/v%d+/books/[^/]+/listen/", "")
     path = path:gsub("^/api/v%d+/books/[^/]+/read/", "")
     path = path:gsub("^/api/v%d+/books/[^/]+/listen/", "")
+    -- Readium can encode the fragment separator along with a spaced href.
+    path = path:gsub("%%23.*$", "")
     path = percentDecode(stripFragment(path)):gsub("^/+", "")
     return normalizePath(path)
 end
@@ -604,7 +606,7 @@ function Epub:resolveHref(document, href)
                     reading_order_count = data.reading_order and #data.reading_order or 0,
                 }
             end
-            if href_key:sub(-#wanted) == wanted or path_key:sub(-#wanted) == wanted then
+            if href_key:sub(-#wanted - 1) == "/" .. wanted or path_key:sub(-#wanted - 1) == "/" .. wanted then
                 suffix_match = suffix_match or { spine_index, item, data, {
                     requested_href = href,
                     wanted = wanted,
@@ -924,6 +926,9 @@ function Epub:locatorToXPointer(document, locator, validator)
     local locations = type(locator.locations) == "table" and locator.locations or {}
     local attempts = {}
     local fragment_failed = false
+    local fragment = type(locations.fragments) == "table" and locations.fragments[1]
+        or (type(locator.href) == "string" and (locator.href:match("#(.+)$") or locator.href:match("%%23(.+)$")))
+    if type(fragment) == "string" then fragment = percentDecode(fragment):gsub("^#", "") end
 
     local function acceptCandidate(attempt, xpointer)
         if not xpointer then
@@ -941,15 +946,15 @@ function Epub:locatorToXPointer(document, locator, validator)
         return true
     end
 
-    if type(locations.fragments) == "table" and locations.fragments[1] then
+    if fragment then
         table.insert(attempts, {
             method = "fragment",
             href = locator.href,
-            fragment = locations.fragments[1],
+            fragment = fragment,
         })
         local _, _, _, href_diagnostic = self:resolveHref(document, locator.href)
         attempts[#attempts].href_diagnostic = href_diagnostic
-        local xpointer = self:hrefFragmentToXPointer(document, locator.href, locations.fragments[1])
+        local xpointer = self:hrefFragmentToXPointer(document, locator.href, fragment)
         if acceptCandidate(attempts[#attempts], xpointer) then
             return xpointer, true, { method = "fragment", attempts = attempts }
         end

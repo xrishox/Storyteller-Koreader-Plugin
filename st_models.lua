@@ -55,7 +55,9 @@ function Models.isDownloadableRelation(book, format)
     if relation.missing == true then
         return false
     end
-    if format == "readaloud" and relation.status ~= "ALIGNED" then
+    -- v3's public schema no longer requires the legacy processing status.
+    -- Older servers still return it; honor it when present.
+    if format == "readaloud" and type(relation.status) == "string" and relation.status ~= "ALIGNED" then
         return false
     end
     return true

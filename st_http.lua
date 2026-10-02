@@ -4,7 +4,6 @@ local http = require("socket.http")
 local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local rapidjson = require("rapidjson")
-local socket = require("socket")
 local socketutil = require("socketutil")
 
 local Models = require("st_models")
@@ -20,7 +19,6 @@ local SUCCESS_STATUSES = {
 local AUTH_ERROR_VALUES = {
     not_authenticated = true,
     unauthorized = true,
-    forbidden = true,
 }
 
 local function isTimeoutCode(code)
@@ -30,9 +28,10 @@ local function isTimeoutCode(code)
 end
 
 local function classifyAuthFailure(status, data)
-    if status == 401 or status == 403 then
+    if status == 401 then
         return true
     end
+    if status == 403 then return false end
     if type(data) == "table" then
         local err = data.error or data.code or data.message
         if type(err) == "string" and AUTH_ERROR_VALUES[string.lower(err)] then
@@ -48,6 +47,16 @@ local function decodeJson(raw_body)
     end
     local ok, data_or_err = pcall(rapidjson.decode, raw_body)
     if ok and data_or_err ~= nil then
+        -- rapidjson represents null as a truthy userdata. SimpleUI and the
+        -- plugin's optional fields use Lua nil, not a JSON sentinel.
+        local function removeNulls(value)
+            if value == rapidjson.null then return nil end
+            if type(value) == "table" then
+                for key, item in pairs(value) do value[key] = removeNulls(item) end
+            end
+            return value
+        end
+        data_or_err = removeNulls(data_or_err)
         return data_or_err, nil
     end
     if ok then
@@ -124,6 +133,10 @@ function Http:transportFor(url)
 end
 
 function Http:request(args)
+    local Async = require("st_async")
+    if Async:current() then
+        return Async:await(function() return self:request(args) end, (args.timeout_total or socketutil.LARGE_TOTAL_TIMEOUT) + 15)
+    end
     local path = args.path or ""
     local url = self:makeUrl(path)
     if not url then
@@ -162,6 +175,7 @@ function Http:request(args)
         url = url,
         method = args.method or "GET",
         headers = headers,
+        redirect = false,
         sink = socketutil.table_sink(sink),
     }
     if body_json then
@@ -174,37 +188,23 @@ function Http:request(args)
         authenticated = authenticated,
     })
 
-    local ok, code, response_headers, status_line = pcall(function()
-        return socket.skip(1, self:transportFor(url).request(request))
+    local ok, completed, code, response_headers, status_line = pcall(function()
+        return self:transportFor(url).request(request)
     end)
     socketutil:reset_timeout()
 
     if not ok then
-        return { ok = false, kind = "network_error", status_line = tostring(code) }
+        return { ok = false, kind = "network_error", status_line = tostring(completed) }
     end
     if isTimeoutCode(code) then
         return { ok = false, kind = "timeout", status_line = status_line }
     end
-    if type(code) ~= "number" then
+    if not completed or type(code) ~= "number" then
         return { ok = false, kind = "network_error", status_line = tostring(code) }
     end
 
     local raw_body = table.concat(sink)
     local data, decode_err = decodeJson(raw_body)
-    if data == nil and decode_err and raw_body ~= "" then
-        return {
-            ok = false,
-            status = code,
-            kind = "decode_error",
-            raw_body = raw_body,
-            headers = response_headers,
-            status_line = status_line,
-        }
-    end
-    if type(data) == "table" and data.status == nil then
-        data.status = code
-    end
-
     if classifyAuthFailure(code, data) then
         return {
             ok = false,
@@ -217,6 +217,19 @@ function Http:request(args)
         }
     end
 
+    if code == 403 then
+        return { ok = false, status = code, kind = "permission_denied", data = data }
+    end
+    if data == nil and decode_err and raw_body ~= "" then
+        return {
+            ok = false,
+            status = code,
+            kind = "decode_error",
+            raw_body = raw_body,
+            headers = response_headers,
+            status_line = status_line,
+        }
+    end
     if SUCCESS_STATUSES[code] then
         return {
             ok = true,
@@ -253,6 +266,10 @@ function Http:request(args)
 end
 
 function Http:download(args)
+    local Async = require("st_async")
+    if Async:current() then
+        return Async:await(function() return self:download(args) end, (args.timeout_total or 1800) + 15)
+    end
     local url = self:makeUrl(args.path)
     if not url then
         return { ok = false, kind = "server_url_missing" }
@@ -281,28 +298,52 @@ function Http:download(args)
         ["Authorization"] = "Bearer " .. token,
     }
     socketutil:set_timeout(args.timeout_block or socketutil.FILE_BLOCK_TIMEOUT,
-        args.timeout_total or socketutil.FILE_TOTAL_TIMEOUT)
+        args.timeout_total or 1800)
+    local bytes = 0
+    local digest = require("ffi/sha2").sha256()
+    local started = os.time()
+    local closed = false
+    local function sink(chunk, sink_error)
+        if sink_error then return nil, sink_error end
+        if not chunk then
+            if not file:flush() or not require("ffi/util").fsyncOpenedFile(file) then
+                return nil, "download storage sync failed"
+            end
+            local close_ok, close_error = file:close()
+            closed = true
+            return close_ok and 1 or nil, close_error
+        end
+        if socketutil.total_timeout >= 0 and os.time() - started > socketutil.total_timeout then
+            return nil, socketutil.SINK_TIMEOUT_CODE
+        end
+        local written, write_error = file:write(chunk)
+        if not written then return nil, write_error end
+        bytes = bytes + #chunk
+        digest(chunk)
+        return 1
+    end
     local request = {
         url = url,
         method = "GET",
         headers = headers,
-        sink = socketutil.file_sink(file),
+        redirect = false,
+        sink = sink,
     }
 
     self.log:info("http_download", { path = args.path })
 
-    local ok, code, response_headers, status_line = pcall(function()
-        return socket.skip(1, self:transportFor(url).request(request))
+    local ok, completed, code, response_headers, status_line = pcall(function()
+        return self:transportFor(url).request(request)
     end)
     socketutil:reset_timeout()
 
     if not ok then
-        return fail{ ok = false, kind = "network_error", status_line = tostring(code) }
+        return fail{ ok = false, kind = "network_error", status_line = tostring(completed) }
     end
     if isTimeoutCode(code) then
         return fail{ ok = false, kind = "timeout", status_line = status_line }
     end
-    if type(code) ~= "number" then
+    if not completed or type(code) ~= "number" then
         return fail{ ok = false, kind = "network_error", status_line = tostring(code) }
     end
     if classifyAuthFailure(code) then
@@ -314,7 +355,11 @@ function Http:download(args)
             status_line = status_line,
         }
     end
-    if code == 200 or code == 206 then
+    if code == 403 then
+        return fail{ ok = false, status = code, kind = "permission_denied" }
+    end
+    -- This is a full download: a 206 response is never safe to commit.
+    if code == 200 then
         local ctype = contentType(response_headers)
         if ctype:match("^text/html") or ctype:find("application/json", 1, true) then
             return fail{
@@ -326,7 +371,7 @@ function Http:download(args)
             }
         end
         local expected_length = contentLength(response_headers)
-        if expected_length and expected_length <= 0 then
+        if bytes == 0 then
             return fail{
                 ok = false,
                 status = code,
@@ -334,6 +379,14 @@ function Http:download(args)
                 headers = response_headers,
                 status_line = status_line,
             }
+        end
+        if not closed or (expected_length and bytes ~= expected_length) then
+            return fail{ ok = false, status = code, kind = "incomplete_download" }
+        end
+        local expected_hash = Models.header(response_headers, "X-Storyteller-Hash")
+        if type(expected_hash) ~= "string" or #expected_hash ~= 64
+                or not expected_hash:match("^%x+$") or digest() ~= expected_hash:lower() then
+            return fail{ ok = false, status = code, kind = "hash_mismatch" }
         end
         return {
             ok = true,
