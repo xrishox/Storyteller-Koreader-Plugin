@@ -75,15 +75,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             position = positions.get(self.path)
             return self.respond(200 if position else 404, position or dict(message='No position found'))
         if '/files?format=ebook' in self.path:
-            assert self.headers.get('Range') is None
+            partial = self.headers.get('Range') == 'bytes=0-0'
+            assert partial or self.headers.get('Range') is None
             if uuid == 'redirect':
                 return self.respond(302, headers={'Location': '/must-not-follow'})
-            self.send_response(200)
+            self.send_response(206 if partial else 200)
             self.send_header('Content-Type', 'application/epub+zip')
-            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Content-Length', '1' if partial else str(len(content)))
+            if partial:
+                self.send_header('Content-Range', f'bytes 0-0/{len(content)}')
             self.send_header('X-Storyteller-Hash', hashlib.sha256(content).hexdigest())
             self.end_headers()
-            self.wfile.write(content[:20] if uuid == 'truncated' else content)
+            self.wfile.write(content[:1] if partial else content[:20] if uuid == 'truncated' else content)
             return
         self.respond(200, book(uuid))
 

@@ -156,6 +156,10 @@ function Http:request(args)
     if authenticated then
         headers["Authorization"] = "Bearer " .. token
     end
+    if args.probe_hash then
+        headers["Accept"] = "application/epub+zip,application/octet-stream"
+        headers["Range"] = "bytes=0-0"
+    end
 
     local body_json
     if args.body ~= nil then
@@ -169,6 +173,16 @@ function Http:request(args)
     end
 
     local sink = {}
+    local response_sink = socketutil.table_sink(sink)
+    local received, ended = 0, false
+    local function bounded_sink(chunk, err)
+        received = received + (chunk and #chunk or 0)
+        -- Never buffer a whole EPUB if a proxy/server ignores Range. Leave
+        -- enough room for ordinary JSON authentication/error responses.
+        if args.probe_hash and received > 4096 then return nil, "response_too_large" end
+        if not chunk and not err then ended = true end
+        return response_sink(chunk, err)
+    end
     socketutil:set_timeout(args.timeout_block or socketutil.LARGE_BLOCK_TIMEOUT,
         args.timeout_total or socketutil.LARGE_TOTAL_TIMEOUT)
     local request = {
@@ -176,7 +190,7 @@ function Http:request(args)
         method = args.method or "GET",
         headers = headers,
         redirect = false,
-        sink = socketutil.table_sink(sink),
+        sink = bounded_sink,
     }
     if body_json then
         request.source = ltn12.source.string(body_json)
@@ -204,6 +218,17 @@ function Http:request(args)
     end
 
     local raw_body = table.concat(sink)
+    if args.probe_hash and code == 206 then
+        local hash = Models.header(response_headers, "X-Storyteller-Hash")
+        local range = Models.header(response_headers, "Content-Range")
+        local size = type(range) == "string" and tonumber(range:match("^bytes 0%-0/(%d+)$"))
+        if not ended or #raw_body ~= 1 or not size or size < 1
+                or contentLength(response_headers) ~= 1
+                or type(hash) ~= "string" or #hash ~= 64 or not hash:match("^%x+$") then
+            return { ok = false, kind = "invalid_file_probe", status = code }
+        end
+        return { ok = true, kind = "success", status = code, hash = hash:lower(), size = size }
+    end
     local data, decode_err = decodeJson(raw_body)
     if classifyAuthFailure(code, data) then
         return {
@@ -219,6 +244,9 @@ function Http:request(args)
 
     if code == 403 then
         return { ok = false, status = code, kind = "permission_denied", data = data }
+    end
+    if args.probe_hash and SUCCESS_STATUSES[code] then
+        return { ok = false, kind = "invalid_file_probe", status = code }
     end
     if data == nil and decode_err and raw_body ~= "" then
         return {

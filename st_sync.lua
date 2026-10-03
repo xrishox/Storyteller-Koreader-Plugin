@@ -398,7 +398,12 @@ function Sync:verifyAsset(sidecar, silent)
         end
         return false, VERIFY_TRANSIENT
     end
-    if not Sidecar:assetFresh(sidecar, result.data) then
+    local fresh, reason = Sidecar:verifyAsset(sidecar, result.data, self.plugin.api, self:documentFile())
+    if not fresh then
+        if reason ~= VERIFY_STALE then
+            if reason == VERIFY_AUTH then self:message(AUTH_FAILED, silent) end
+            return false, reason
+        end
         self.plugin.log:info("sync_asset_stale", {
             book_uuid = sidecar.book_uuid,
             format = sidecar.format,
@@ -969,7 +974,7 @@ function Sync:onCloseDocument()
         local valid, saved = Sidecar:validate(filepath, config)
         if not valid then return end
         local book = api:getBook(saved.book_uuid)
-        if not book.ok or not Sidecar:assetFresh(saved, book.data) then return end
+        if not book.ok or not Sidecar:verifyAsset(saved, book.data, api, filepath) then return end
         local remote = api:getPosition(saved.book_uuid)
         if remote.ok and hasRemotePosition(remote.data) then
             local decision = self:remoteDecision(saved, payload, remote.data, "close_document")

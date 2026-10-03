@@ -212,7 +212,26 @@ function Downloader:selectAndOpen(book, requested_format)
         ReaderUI:showReader(path)
         return
     elseif state == "stale" then
-        self:promptStale(book, format, path)
+        self.plugin.api:whenConnected(function()
+            local valid, sidecar = Sidecar:validate(path, self.plugin.config)
+            if not valid then
+                self:promptStale(book, format, path)
+                return
+            end
+            local current = self.plugin.api:getBook(sidecar.book_uuid)
+            if not current.ok then
+                UIManager:show(InfoMessage:new{ text = "Failed to verify Storyteller book. Please try again." })
+                return
+            end
+            local fresh, reason = Sidecar:verifyAsset(sidecar, current.data, self.plugin.api, path)
+            if fresh then
+                ReaderUI:showReader(path)
+            elseif reason == "stale" then
+                self:promptStale(book, format, path)
+            else
+                UIManager:show(InfoMessage:new{ text = "Failed to verify Storyteller book. Please try again." })
+            end
+        end, {owner=self,key="verify"})
         return
     elseif state == "collision" then
         self:promptCollision(book, format, path)

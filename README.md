@@ -43,7 +43,9 @@ Most books should restore to the expected place. Some unusual EPUB files may res
 
 ## Compatibility
 
-Version `1.1.1` was validated against Storyteller `web-v3.0.0-beta.46`, KOReader KindleHF `v2026.07.2`, and the SimpleUI fork `v2.7.1-storyteller.2`, which includes the background-loading adapter. Storyteller v3 beta still uses the `/api/v2` endpoints used by this plugin.
+Version `1.1.2` was validated against Storyteller `web-v3.0.0-beta.46`, KOReader KindleHF `v2026.07.2`, and the SimpleUI fork `v2.7.1-storyteller.3`. Storyteller v3 beta still uses the `/api/v2` endpoints used by this plugin.
+
+Version `1.1.2` fixes false “older Storyteller file version” warnings after server library scans. When the same asset's timestamp changes, the plugin requests one byte of the server file to check its full-file SHA-256 header and size. Identical files keep their reading progress and receive the verified metadata timestamp; changed files still require a new download. This applies when opening from the library, syncing in the reader, and syncing on close. Failed verification remains retryable and does not certify a file as current.
 
 This update fixes nullable API responses in SimpleUI, server/account changes, progress conflicts, offline retries and pending progress, download integrity, and encoded EPUB resource references. See the [full audit and remaining limitations](docs/compatibility-audit-2026-10-02.md) and [regression test instructions](tests/README.md).
 
@@ -62,7 +64,7 @@ The intentional backward-progress protection and 15-second suppression after app
 
 ### SimpleUI background loading
 
-Install [SimpleUI `v2.7.1-storyteller.2`](https://github.com/xrishox/simpleui.koplugin/releases/tag/v2.7.1-storyteller.2) alongside this release. It includes background library loading and cancellation; no manual patch is needed.
+Install [SimpleUI `v2.7.1-storyteller.3`](https://github.com/xrishox/simpleui.koplugin/releases/tag/v2.7.1-storyteller.3) alongside this release. It includes background library loading, cancellation, and the exit fix; no manual patch is needed. The background-loading integration in `v2.7.1-storyteller.2` remains compatible.
 
 For users staying on the previous SimpleUI release:
 

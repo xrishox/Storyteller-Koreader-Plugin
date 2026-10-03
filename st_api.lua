@@ -120,6 +120,15 @@ function Api:savePosition(book_uuid, locator, timestamp)
     }
 end
 
+function Api:getFileHash(book_uuid, format)
+    return self.http:request{
+        method = "GET",
+        path = bookPath(book_uuid, "/files?format=" .. Models.urlEncode(format)),
+        probe_hash = true,
+        handled_statuses = { [404] = true },
+    }
+end
+
 function Api:downloadFile(book_uuid, format, filepath)
     return self.http:download{
         path = bookPath(book_uuid, "/files?format=" .. Models.urlEncode(format)),

@@ -257,6 +257,123 @@ test('invalid XPointer falls back to an actual publication resource',function()
     doc.info={has_pages=false};local p=Locator:build(ui,{format='ebook'},100);eq(p.locator.href,'OPS/Text/ch 1.xhtml')
 end)
 local Downloader=require('st_downloader')
+test('file hash probe requests one byte and validates the full-file checksum header',function()
+    handler=function(req)
+        eq(req.headers.Range,'bytes=0-0');eq(req.headers.Authorization,'Bearer TEST_TOKEN')
+        assert(req.sink('P'));assert(req.sink(nil))
+        return 1,206,{['content-range']='bytes 0-0/'..#bytes,['content-length']='1',
+            ['x-storyteller-hash']=sha.sha256(bytes):upper()}
+    end
+    local result=api:getFileHash('book-1','ebook')
+    assert(result.ok);eq(result.hash,sha.sha256(bytes));eq(result.size,#bytes)
+end)
+test('file hash probe rejects missing hashes, malformed ranges and unfinished responses',function()
+    for _,case in ipairs({
+        {{['content-range']='bytes 0-0/100',['content-length']='1'},true},
+        {{['content-range']='bytes 0-1/100',['content-length']='1',['x-storyteller-hash']=sha.sha256(bytes)},true},
+        {{['content-range']='bytes 0-0/100',['content-length']='1',['x-storyteller-hash']=sha.sha256(bytes)},false},
+    }) do
+        response(206,'P',case[1],case[2]);eq(api:getFileHash('b','ebook').kind,'invalid_file_probe')
+    end
+end)
+test('file hash probe keeps auth and timeout failures distinct and bounds ignored ranges',function()
+    response(401,'Unauthorized');eq(api:getFileHash('b','ebook').kind,'not_authenticated')
+    response(403,'');eq(api:getFileHash('b','ebook').kind,'permission_denied')
+    response(404,'{}');eq(api:getFileHash('b','ebook').status,404)
+    response(200,'P');eq(api:getFileHash('b','ebook').ok,false)
+    handler=function(req) eq(req.sink(string.rep('x',4097)),nil);return nil,'response_too_large' end
+    eq(api:getFileHash('b','ebook').ok,false)
+    handler=function() return nil,require('socketutil').TIMEOUT_CODE end
+    eq(api:getFileHash('b','ebook').kind,'timeout')
+end)
+local function revisionFixture()
+    local path=tmp..'/revision.epub';put(path,bytes)
+    local saved=Sidecar:build(config,path,book,'ebook',sha.sha256(bytes))
+    assert(Sidecar:writeFull(path,saved))
+    local changed=clone(book);changed.ebook.updatedAt='2026-10-03 00:00:00'
+    local client={getFileHash=function() return {ok=true,hash=sha.sha256(bytes),size=#bytes} end,
+        getBook=function() return {ok=true,data=changed} end}
+    return path,saved,changed,client
+end
+test('metadata-only scan is accepted once and preserves newer pending progress',function()
+    local path,saved,changed,client=revisionFixture()
+    client.getFileHash=function()
+        assert(Sidecar:setPendingPosition(path,payload(.7,987)))
+        return {ok=true,hash=sha.sha256(bytes),size=#bytes}
+    end
+    assert(Sidecar:verifyAsset(saved,changed,client,path))
+    eq(saved.asset_updated_at,changed.ebook.updatedAt)
+    local current=Sidecar:read(path)
+    eq(current.asset_updated_at,changed.ebook.updatedAt);eq(current.pending_position.timestamp,987)
+    eq(current.downloaded_at,saved.downloaded_at);eq(read(path),bytes)
+    client.getFileHash=function() error('unchanged revision probed twice') end
+    assert(Sidecar:verifyAsset(current,changed,client,path))
+end)
+test('changed bytes, size, asset identity and missing files remain stale',function()
+    for _,kind in ipairs({'hash','size','identity','missing'}) do
+        local path,saved,changed,client=revisionFixture()
+        if kind=='hash' then client.getFileHash=function() return {ok=true,hash=sha.sha256('different'),size=#bytes} end
+        elseif kind=='size' then client.getFileHash=function() return {ok=true,hash=sha.sha256(bytes),size=#bytes+1} end
+        else
+            if kind=='identity' then changed.ebook.uuid='replacement' else changed.ebook.missing=true end
+            client.getFileHash=function() error('ineligible asset probed') end
+        end
+        local ok,reason=Sidecar:verifyAsset(saved,changed,client,path)
+        eq(ok,false);eq(reason,'stale');eq(Sidecar:read(path).asset_updated_at,book.ebook.updatedAt)
+    end
+end)
+test('failed checksum verification never labels a network failure as an older file',function()
+    for _,case in ipairs({{'timeout','timeout'},{'not_authenticated','auth'},{'invalid_file_probe','transient'}}) do
+        local path,saved,changed,client=revisionFixture()
+        client.getFileHash=function() return {ok=false,kind=case[1]} end
+        local ok,reason=Sidecar:verifyAsset(saved,changed,client,path)
+        eq(ok,false);eq(reason,case[2]);eq(Sidecar:read(path).asset_updated_at,book.ebook.updatedAt)
+    end
+end)
+test('revision changes during the hash probe require another verification',function()
+    local path,saved,changed,client=revisionFixture()
+    client.getBook=function() local newer=clone(changed);newer.ebook.updatedAt='later';return {ok=true,data=newer} end
+    local ok,reason=Sidecar:verifyAsset(saved,changed,client,path)
+    eq(ok,false);eq(reason,'transient');eq(Sidecar:read(path).asset_updated_at,book.ebook.updatedAt)
+end)
+test('readaloud metadata changes use the selected format and preserve its identity',function()
+    local path,saved,changed,client=revisionFixture()
+    changed.readaloud=changed.ebook;changed.ebook=nil
+    saved.format='readaloud';assert(Sidecar:writeFull(path,saved))
+    client.getFileHash=function(_,uuid,format)
+        eq(uuid,saved.book_uuid);eq(format,'readaloud')
+        return {ok=true,hash=sha.sha256(bytes),size=#bytes}
+    end
+    assert(Sidecar:verifyAsset(saved,changed,client,path))
+    eq(Sidecar:read(path).format,'readaloud')
+end)
+test('failed revision persistence is retryable and keeps pending progress',function()
+    local path,saved,changed,client=revisionFixture()
+    assert(Sidecar:setPendingPosition(path,payload(.6,988)))
+    local storage=require('st_storage');local old=storage.write
+    storage.write=function() return false,'disk_full' end
+    local ok,reason=Sidecar:verifyAsset(saved,changed,client,path)
+    storage.write=old
+    eq(ok,false);eq(reason,'transient');eq(saved.asset_updated_at,book.ebook.updatedAt)
+    eq(Sidecar:read(path).pending_position.timestamp,988)
+    assert(Sidecar:verifyAsset(saved,changed,client,path))
+end)
+test('reader sync uses the checksum fallback after a metadata-only scan',function()
+    local path,saved,changed,client=revisionFixture()
+    local state=Sync:new{config=config,log=log,api=client,ui={document={file=path}}}
+    assert(state:verifyAsset(saved,true));eq(Sidecar:read(path).asset_updated_at,changed.ebook.updatedAt)
+end)
+test('library open verifies timestamp mismatches without redownloading the book',function()
+    local path,saved,changed,client=revisionFixture()
+    client.whenConnected=function(_,fn) fn() end
+    local downloader=Downloader:new{config=config,api=client,log=log}
+    downloader.findExisting=function() return path,'stale' end
+    downloader.promptStale=function() error('identical file was labelled stale') end
+    local reader=require('apps/reader/readerui');local old=reader.showReader;local opened_path
+    reader.showReader=function(_,p) opened_path=p end
+    downloader:selectAndOpen(changed,'ebook');eq(opened_path,path)
+    reader.showReader=old
+end)
 local opened
 local dl=Downloader:new(plugin)
 local originalFind,originalDir,originalSelect=dl.findExisting,dl.defaultDir,dl.selectAndOpen
@@ -525,12 +642,15 @@ if server then
     test('closing the reader finishes a captured upload without accessing the closed document',function()
         local dest=tmp..'/downloaded.epub'
         assert(Sidecar:updateSyncFields(dest,1000,'local_push',payload(.8,1000).locator))
+        -- Simulate the saved timestamp lagging behind a server metadata scan.
+        local saved=Sidecar:read(dest);saved.asset_updated_at='older';assert(Sidecar:writeFull(dest,saved))
         local ui={document={file=dest,info={has_pages=false}}}
         local state=Sync:new{config=config,api=api,log=log,ui=ui}
         state.active=true;state.filepath=dest;state.sidecar=Sidecar:read(dest);state.pending_progress_payload=payload(.9,2000)
         state:onCloseDocument();api:cancel();ui.document=nil;drain()
         eq(api:getPosition('wire-book').data.timestamp,2000)
         eq(Sidecar:read(dest).pending_position,nil)
+        eq(Sidecar:read(dest).asset_updated_at,api:getBook('wire-book').data.ebook.updatedAt)
     end)
     test('real HTTP truncation, redirect and permission responses are rejected',function()
         eq(api:downloadFile('truncated','ebook',download).ok,false);eq(lfs.attributes(download),nil)

@@ -6,5 +6,5 @@ return {
     name = "storyteller",
     fullname = _("Storyteller"),
     description = _("Download books and sync reading progress with Storyteller."),
-    version = "1.1.1",
+    version = "1.1.2",
 }

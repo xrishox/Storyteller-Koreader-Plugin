@@ -284,4 +284,48 @@ function Sidecar:assetFresh(sidecar, book)
         and Models.isDownloadableRelation(book, sidecar.format)
 end
 
+-- updatedAt describes a database row, not necessarily a different EPUB. A
+-- library scan can touch it without changing a single byte of the download.
+function Sidecar:verifyAsset(sidecar, book, api, filepath)
+    if self:assetFresh(sidecar, book) then return true, "ok" end
+    local relation = Models.getAssetRelation(book, sidecar.format)
+    if not relation or relation.uuid ~= sidecar.asset_uuid
+            or not Models.isNonEmptyString(relation.updatedAt)
+            or not Models.isDownloadableRelation(book, sidecar.format) then
+        return false, "stale"
+    end
+    local function failure(result)
+        if result.kind == "not_authenticated" then return "auth" end
+        if result.kind == "timeout" then return "timeout" end
+        if result.status == 404 then return "stale" end
+        return "transient"
+    end
+    local probe = api:getFileHash(sidecar.book_uuid, sidecar.format)
+    if not probe.ok then return false, failure(probe) end
+    if probe.hash ~= sidecar.downloaded_hash:lower()
+            or probe.size ~= tonumber(sidecar.local_file_size) then
+        return false, "stale"
+    end
+    -- Do not certify a revision which changed again while the probe ran.
+    local latest = api:getBook(sidecar.book_uuid)
+    if not latest.ok then return false, failure(latest) end
+    local current = Models.getAssetRelation(latest.data, sidecar.format)
+    if not current or current.uuid ~= relation.uuid
+            or not Models.isDownloadableRelation(latest.data, sidecar.format) then
+        return false, "stale"
+    end
+    if current.updatedAt ~= relation.updatedAt then return false, "transient" end
+    -- Re-read before writing: page turns may have saved newer pending progress
+    -- while the network request yielded. Update only the confirmed revision.
+    local saved = self:read(filepath)
+    if not self:identityMatches(saved, sidecar) or saved.asset_uuid ~= sidecar.asset_uuid
+            or saved.downloaded_hash ~= sidecar.downloaded_hash then
+        return false, "transient"
+    end
+    saved.asset_updated_at = current.updatedAt
+    if not self:writeFull(filepath, saved) then return false, "transient" end
+    sidecar.asset_updated_at = current.updatedAt
+    return true, "ok"
+end
+
 return Sidecar
