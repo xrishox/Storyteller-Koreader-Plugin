@@ -74,6 +74,19 @@ function Browser:open()
             require("st_async"):cancel(self)
             UIManager:close(menu)
         end
+        -- KOReader's Menu runs close_callback after every leaf selection, which
+        -- would close the browser on in-place navigation. Only book picks close it.
+        menu.onMenuSelect = function(m, item)
+            if item.closes_menu or item.sub_item_table then
+                return Menu.onMenuSelect(m, item)
+            end
+            if item.select_enabled == false
+                    or (item.select_enabled_func and not item.select_enabled_func()) then
+                return true
+            end
+            if item.callback then item.callback() end
+            return true
+        end
         self.menu = menu
         UIManager:show(menu)
         self:load()
@@ -164,6 +177,7 @@ function Browser:bookItem(book)
     return {
         text = Models.bookTitle(book),
         mandatory = Models.authorText(book),
+        closes_menu = true,
         callback = function()
             self.plugin.downloader:selectAndOpen(book)
         end,
